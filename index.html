@@ -1,0 +1,691 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SquatCheck</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#f6f7f9; --card:#fff; --ink:#15181d; --muted:#5b6470; --line:#dde1e7;
+  --accent:#1f5eff; --accent-ink:#fff; --good:#0a7d3c; --good-bg:#dff5e8; --bad:#a8322a; --bad-bg:#fbe3e0;
+  --bar:#00a7c4; --thigh:#f08a00; --err:#a8322a;
+}
+@media (prefers-color-scheme:dark){
+  :root{ --bg:#0f1216; --card:#181c22; --ink:#eceff3; --muted:#9aa4b2; --line:#2b323b;
+    --accent:#5b8cff; --accent-ink:#0b1020; --good:#5fd38d; --good-bg:#12301f; --bad:#ff8a80; --bad-bg:#3a1916;
+    --bar:#2fd3ee; --thigh:#ffb13b; --err:#ff8a80; }
+}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--bg);color:var(--ink);font:16px/1.5 Inter,system-ui,sans-serif;min-width:320px}
+h1,h2,h3{font-family:"Space Grotesk",Inter,sans-serif;margin:0 0 .4em;line-height:1.2}
+h1{font-size:1.8rem} h2{font-size:1.2rem}
+main{max-width:920px;margin:0 auto;padding:16px 16px 64px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px;margin:16px 0}
+.muted{color:var(--muted)} .small{font-size:.875rem}
+button,.btn{font:inherit;font-weight:600;border:1px solid var(--line);background:var(--card);color:var(--ink);border-radius:10px;padding:9px 14px;cursor:pointer}
+button.primary{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
+button:disabled{opacity:.45;cursor:not-allowed}
+:focus-visible{outline:3px solid var(--accent);outline-offset:2px}
+.row{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+#drop{border:2px dashed var(--line);border-radius:12px;padding:22px;text-align:center}
+#drop.over{border-color:var(--accent);background:color-mix(in srgb,var(--accent) 8%,transparent)}
+#status{display:flex;flex-direction:column;gap:6px;margin:12px 0}
+#status.error #statusText{color:var(--err);font-weight:600}
+progress{width:100%;height:8px;accent-color:var(--accent)}
+#workArea[hidden],[hidden]{display:none!important}
+#stage{position:relative;margin:0 auto;background:#000;border-radius:10px;overflow:hidden;max-height:72vh}
+#stage video,#stage canvas{position:absolute;inset:0;width:100%;height:100%;object-fit:contain}
+#stage.marking canvas{cursor:crosshair}
+#rec{width:100%;max-height:60vh;background:#000;border-radius:10px}
+.tips{background:color-mix(in srgb,var(--accent) 8%,transparent);border-radius:10px;padding:10px 14px}
+.tips ul{margin:.3em 0 0;padding-left:1.2em}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px}
+.stat{border:1px solid var(--line);border-radius:10px;padding:10px 12px}
+.stat b{display:block;font:700 1.6rem "Space Grotesk",sans-serif}
+.rep{display:grid;grid-template-columns:auto 1fr auto;gap:6px 14px;align-items:center;border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin:8px 0}
+.badge{display:inline-block;font-weight:700;border-radius:999px;padding:2px 10px;font-size:.9rem}
+.badge.below{background:var(--good-bg);color:var(--good)} .badge.above{background:var(--bad-bg);color:var(--bad)} .badge.na{background:var(--line);color:var(--muted)}
+.rep .meta{grid-column:1/-1;font-size:.85rem;color:var(--muted)}
+#chartWrap svg{width:100%;height:auto;display:block;touch-action:manipulation}
+#chartWrap:focus-visible{outline:3px solid var(--accent);border-radius:8px}
+table{border-collapse:collapse;width:100%;font-size:.9rem}
+th,td{text-align:left;border-bottom:1px solid var(--line);padding:5px 8px}
+input[type=range]{width:100%;accent-color:var(--accent)}
+#caption{min-height:2.7em;margin:8px 0}
+</style>
+</head>
+<body>
+<main>
+<header>
+  <h1>SquatCheck</h1>
+  <p class="muted">Did each rep reach parallel? Upload or record a side-on set in a power rack. Everything stays on your device.</p>
+</header>
+
+<section class="card" aria-labelledby="srcH">
+  <h2 id="srcH">1 · Choose a video</h2>
+  <div id="drop">
+    <p style="margin:0 0 10px">Drag a video here, or</p>
+    <div class="row" style="justify-content:center">
+      <button class="primary" id="pick" type="button">Upload a video</button>
+      <button id="recBtn" type="button" hidden>Record a set</button>
+      <button id="sampleBtn" type="button">Try the sample</button>
+    </div>
+    <input id="file" type="file" accept="video/*" hidden>
+  </div>
+  <div id="recPanel" hidden style="margin-top:12px">
+    <video id="rec" autoplay muted playsinline></video>
+    <div class="row" style="margin-top:8px">
+      <button class="primary" id="recStart" type="button">Start recording</button>
+      <button id="recStop" type="button" disabled>Stop</button>
+      <button id="recCancel" type="button">Cancel</button>
+      <span id="recTime" class="muted small" aria-live="off"></span>
+    </div>
+  </div>
+  <div class="tips small" style="margin-top:12px">
+    <strong>Filming tips</strong>
+    <ul>
+      <li>Film side-on, with the phone propped at about hip height and the camera held still.</li>
+      <li>Keep the whole lifter and the near safety bar in frame, including the knee at the bottom.</li>
+      <li>Use a power rack with safety bars set at parallel; one lifter in view.</li>
+    </ul>
+  </div>
+</section>
+
+<div id="status" role="status" aria-live="polite"><span id="statusText">Choose a video to begin.</span><progress id="prog" max="100" value="0" hidden></progress></div>
+
+<div id="workArea" hidden>
+<section class="card" aria-labelledby="barH">
+  <h2 id="barH">2 · Safety bar and analysis</h2>
+  <div id="stage"><video id="video" muted playsinline preload="auto"></video><canvas id="ov"></canvas></div>
+  <p id="barInfo" class="muted small" style="text-align:center"></p>
+  <div class="row" style="justify-content:center">
+    <button id="markBtn" type="button">Mark bar by hand</button>
+    <button id="analyzeBtn" class="primary" type="button" disabled>Analyze</button>
+  </div>
+  <div id="tipsNoReps" class="tips small" hidden style="margin-top:12px">
+    <strong>No reps found.</strong> Check that:
+    <ul><li>the lifter's hips and knees are visible for the whole set;</li><li>the camera is side-on and steady;</li><li>the set includes at least one full dip and return to standing.</li></ul>
+  </div>
+</section>
+
+<div id="results" hidden>
+<section class="card" aria-labelledby="sumH">
+  <h2 id="sumH">Summary</h2>
+  <div class="stats" id="summary"></div>
+  <p id="doneInfo" class="muted small"></p>
+</section>
+<section class="card" aria-labelledby="repH">
+  <h2 id="repH">Rep verdicts</h2>
+  <div id="repList"></div>
+</section>
+<section class="card" aria-labelledby="chH">
+  <h2 id="chH">Hip height</h2>
+  <p class="muted small">Hip height above the safety bar for the whole set. Click the chart, or focus it and use ← → to step frames.</p>
+  <div id="chartWrap" tabindex="0" role="img" aria-label="Hip height chart. Use left and right arrow keys to step frames."></div>
+</section>
+<section class="card" aria-labelledby="vwH">
+  <h2 id="vwH">Frame viewer</h2>
+  <p>Use the video above: the line and angle are drawn on measured frames.</p>
+  <input id="scrub" type="range" min="0" max="0" value="0" aria-label="Frame">
+  <div class="row" style="margin-top:6px">
+    <button id="prevF" type="button">◀ Prev</button><button id="nextF" type="button">Next ▶</button>
+  </div>
+  <div id="caption" aria-live="polite"></div>
+</section>
+<section class="card" aria-labelledby="exH">
+  <h2 id="exH">Export</h2>
+  <div class="row"><button id="copyCsv" type="button">Copy as CSV</button><span id="copyMsg" class="muted small" role="status"></span></div>
+  <div style="overflow-x:auto;margin-top:8px"><table id="exTable"></table></div>
+</section>
+</div>
+</div>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.20.0/dist/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/pose-detection@2.1.3/dist/pose-detection.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/body-segmentation@1.0.2/dist/body-segmentation.min.js"></script>
+<script>
+'use strict';
+const FPS = 30, AN_LONG = 540;
+const SC = window.SC = { vw:0, vh:0, dur:0, N:0, bar:null, barAuto:false, frames:[], reps:[], nearLeg:null, busy:false, stats:{pose:0,seg:0}, view:0 };
+const $ = id => document.getElementById(id);
+const video = $('video'), ov = $('ov'), octx = ov.getContext('2d');
+const acv = document.createElement('canvas'), actx = acv.getContext('2d', { willReadFrequently:true });
+window.acv = acv;
+let detector = null, segmenter = null, objectUrl = null, markPts = null, viewSeq = 0, loadSeq = 0;
+const clamp = (v,a,b) => Math.max(a, Math.min(b, v));
+const median = a => { const s = a.slice().sort((x,y)=>x-y), m = s.length>>1; return s.length%2 ? s[m] : (s[m-1]+s[m])/2; };
+
+/* ---------- status (FR16) ---------- */
+function setStatus(msg, o={}) {
+  $('statusText').textContent = msg;
+  $('status').classList.toggle('error', !!o.error);
+  const p = $('prog');
+  if (o.pct == null) p.hidden = true; else { p.hidden = false; p.value = o.pct; }
+}
+const fail = msg => setStatus(msg, { error:true });
+
+/* ---------- video access (hookable for tests) ---------- */
+async function waitVisible() {
+  if (document.visibilityState === 'visible') return;
+  const pct = $('prog').hidden ? null : $('prog').value;
+  setStatus('Paused while this tab is in the background', { pct });
+  await new Promise(res => {
+    const f = () => { if (document.visibilityState === 'visible') { document.removeEventListener('visibilitychange', f); res(); } };
+    document.addEventListener('visibilitychange', f);
+  });
+}
+function framePainted() {
+  return new Promise(res => {
+    let d = false; const f = () => { if (!d) { d = true; res(); } };
+    if ('requestVideoFrameCallback' in video) video.requestVideoFrameCallback(f);
+    setTimeout(f, 150);
+  });
+}
+async function seekTime(t) {
+  await waitVisible();
+  if (!(Math.abs(video.currentTime - t) < 1e-3 && !video.seeking && video.readyState >= 2)) {
+    await new Promise(res => {
+      const done = () => { clearTimeout(to); video.removeEventListener('seeked', done); res(); };
+      const to = setTimeout(done, 3000);
+      video.addEventListener('seeked', done);
+      video.currentTime = t;
+    });
+  }
+  await framePainted();
+}
+async function seekTo(i) { return seekTime((i + 0.5) / FPS); }
+function sizeAcv() {
+  const k = AN_LONG / Math.max(SC.vw, SC.vh);
+  acv.width = Math.round(SC.vw * k); acv.height = Math.round(SC.vh * k);
+}
+async function grabFrame(i) {
+  await seekTo(i); sizeAcv();
+  actx.drawImage(video, 0, 0, acv.width, acv.height);
+}
+
+/* ---------- loading sources (FR1-FR3) ---------- */
+function loadVideo(url, revoke) {
+  const my = ++loadSeq;
+  if (objectUrl) URL.revokeObjectURL(objectUrl);
+  objectUrl = revoke ? url : null;
+  resetResults(); $('workArea').hidden = true; markPts = null; SC.bar = null;
+  setStatus('Loading video…', { pct:10 });
+  video.onerror = () => { if (my === loadSeq) fail("This browser can't play that file. Try an MP4 (H.264) or WebM video, or record in the app."); };
+  video.onloadedmetadata = () => { if (my === loadSeq) onMeta(my); };
+  video.src = url; video.load();
+}
+async function onMeta(my) {
+  try {
+    if (!isFinite(video.duration)) {                       // WebM recordings: duration is Infinity
+      await new Promise(res => { video.addEventListener('durationchange', res, { once:true }); video.currentTime = 1e101; setTimeout(res, 3000); });
+      await new Promise(res => { video.addEventListener('seeked', res, { once:true }); video.currentTime = 0; setTimeout(res, 3000); });
+    }
+    if (my !== loadSeq) return;
+    applyMeta(video.videoWidth, video.videoHeight, video.duration);
+    await autoBar();
+  } catch (e) { fail('Could not read the video: ' + e.message + ' Try another file.'); }
+}
+function applyMeta(w, h, dur) {
+  if (!w || !h || !isFinite(dur) || dur <= 0) { fail("This video has no readable size or length. Try another file."); return; }
+  SC.vw = w; SC.vh = h; SC.dur = dur;
+  let n = Math.round(dur * FPS); if ((n - 0.5) / FPS > dur) n--;
+  SC.N = n;
+  ov.width = w; ov.height = h;
+  const st = $('stage'); st.style.aspectRatio = w + ' / ' + h; st.style.width = 'min(100%, ' + (72 * w / h) + 'vh)';
+  $('workArea').hidden = false; $('scrub').max = n - 1; $('scrub').value = 0;
+  $('analyzeBtn').disabled = true; drawOverlay(0);
+}
+async function autoBar() {
+  setStatus('Looking for the safety bar…', { pct:30 });
+  const my = loadSeq;
+  let bar = null;
+  try { bar = await detectBar(); } catch (e) { console.warn(e); }
+  if (my !== loadSeq) return;
+  if (bar) { setBar(bar.p1, bar.p2, true); setStatus('Safety bar found. Check the cyan line sits on the near safety bar, then tap Analyze.'); }
+  else { setStatus("Couldn't find the safety bar automatically. Tap Mark bar by hand, then tap both ends of the bar.", { error:true }); startMark(); }
+}
+
+/* ---------- safety bar detection ---------- */
+async function detectBar() {
+  const w = 320, h = Math.round(SC.vh * w / SC.vw), c = document.createElement('canvas');
+  c.width = w; c.height = h; const cx = c.getContext('2d', { willReadFrequently:true });
+  const n = clamp(Math.round(SC.dur * 3), 3, 15), grays = [];
+  for (let k = 0; k < n; k++) {
+    await seekTime((k + 0.5) / n * SC.dur);
+    cx.drawImage(video, 0, 0, w, h);
+    const d = cx.getImageData(0, 0, w, h).data, g = new Uint8Array(w * h);
+    for (let p = 0; p < w * h; p++) g[p] = (0.299 * d[4*p] + 0.587 * d[4*p+1] + 0.114 * d[4*p+2]) | 0;
+    grays.push(g);
+  }
+  const med = new Uint8Array(w * h), tmp = new Uint8Array(n);
+  for (let p = 0; p < w * h; p++) { for (let k = 0; k < n; k++) tmp[k] = grays[k][p]; tmp.sort(); med[p] = tmp[n >> 1]; }
+  // Sobel
+  const gxA = new Float32Array(w * h), gyA = new Float32Array(w * h), mag = new Float32Array(w * h), hist = new Uint32Array(2048);
+  for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
+    const i = y * w + x;
+    const a = med[i-w-1], b = med[i-w], c2 = med[i-w+1], d = med[i-1], f = med[i+1], g = med[i+w-1], hh = med[i+w], j = med[i+w+1];
+    const gx = (c2 + 2*f + j) - (a + 2*d + g), gy = (g + 2*hh + j) - (a + 2*b + c2);
+    gxA[i] = gx; gyA[i] = gy; const m = Math.sqrt(gx*gx + gy*gy); mag[i] = m; hist[Math.min(2047, m | 0)]++;
+  }
+  let acc = 0, p80 = 0; const target = 0.8 * w * h;
+  for (let v = 0; v < 2048; v++) { acc += hist[v]; if (acc >= target) { p80 = v; break; } }
+  const thr = Math.max(40, p80), ex = [], ey = [], ew = [];
+  for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
+    const i = y * w + x;
+    if (Math.abs(gyA[i]) >= 2 * Math.abs(gxA[i]) && mag[i] > thr) { ex.push(x); ey.push(y); ew.push(mag[i]); }
+  }
+  if (!ex.length) return null;
+  // Hough, normals 70-110 deg
+  const NT = 161, off = Math.ceil(0.35 * w) + 2, NR = h + 2 * off, accum = new Float32Array(NT * NR), cs = [], sn = [];
+  for (let k = 0; k < NT; k++) { const t = (70 + 0.5 * k) * Math.PI / 180; cs.push(Math.cos(t)); sn.push(Math.sin(t)); }
+  for (let e = 0; e < ex.length; e++) for (let k = 0; k < NT; k++) {
+    const r = Math.round(ex[e] * cs[k] + ey[e] * sn[k]) + off;
+    if (r >= 0 && r < NR) accum[k * NR + r] += ew[e];
+  }
+  const cells = [];
+  for (let k = 0; k < NT; k++) for (let r = 0; r < NR; r++) {
+    const v = accum[k * NR + r]; if (v <= 0) continue;
+    const rho = r - off, yc = (rho - (w / 2) * cs[k]) / sn[k], z = (yc - h / 2) / (0.22 * h);
+    cells.push({ k, rho, score: v * Math.exp(-0.5 * z * z) });
+  }
+  cells.sort((a, b) => b.score - a.score);
+  const lines = [];
+  for (const c3 of cells) {
+    if (lines.length >= 40) break;
+    if (lines.some(l => Math.abs(l.rho - c3.rho) < 4 && Math.abs(l.k - c3.k) < 6)) continue;
+    lines.push(c3);
+  }
+  for (const l of lines) {
+    const co = cs[l.k], si = sn[l.k], ts = [];
+    for (let e = 0; e < ex.length; e++) if (Math.abs(ex[e] * co + ey[e] * si - l.rho) <= 1) ts.push(-ex[e] * si + ey[e] * co);
+    if (ts.length < 2) continue;
+    ts.sort((a, b) => a - b);
+    let best = null, s = ts[0], prev = ts[0];
+    const close = (a, b) => { if (!best || b - a > best[1] - best[0]) best = [a, b]; };
+    for (let q = 1; q < ts.length; q++) { if (ts[q] - prev > 8) { close(s, prev); s = ts[q]; } prev = ts[q]; }
+    close(s, prev);
+    if (best[1] - best[0] >= 0.15 * w) {
+      const k = SC.vw / w, pt = t => ({ x: (l.rho * co - t * si) * k, y: (l.rho * si + t * co) * k });
+      return { p1: pt(best[0]), p2: pt(best[1]) };
+    }
+  }
+  return null;
+}
+function setBar(p1, p2, auto) {
+  SC.bar = { p1, p2 }; SC.barAuto = !!auto;
+  $('barInfo').textContent = `Bar (${auto ? 'found automatically' : 'marked by hand'}): (${p1.x.toFixed(0)}, ${p1.y.toFixed(0)}) to (${p2.x.toFixed(0)}, ${p2.y.toFixed(0)}) in video pixels`;
+  $('analyzeBtn').disabled = SC.busy;
+  if (SC.reps.length) { computeResults(); renderResults(); setStatus('Bar re-marked: results updated without re-analysis.'); }
+  drawOverlay(SC.view);
+}
+/* ---------- manual bar marking (FR5) ---------- */
+function startMark() {
+  if (SC.busy) return;
+  markPts = []; $('stage').classList.add('marking');
+  $('barInfo').textContent = 'Tap the left end of the bar, then the right end.';
+}
+function ovPoint(ev) {
+  const r = ov.getBoundingClientRect(), s = Math.min(r.width / SC.vw, r.height / SC.vh);
+  const dw = SC.vw * s, dh = SC.vh * s, ox = r.left + (r.width - dw) / 2, oy = r.top + (r.height - dh) / 2;
+  return { x: clamp((ev.clientX - ox) / s, 0, SC.vw), y: clamp((ev.clientY - oy) / s, 0, SC.vh) };
+}
+ov.addEventListener('click', ev => {
+  if (!markPts) return;
+  markPts.push(ovPoint(ev));
+  if (markPts.length === 2) {
+    const [a, b] = markPts; markPts = null; $('stage').classList.remove('marking');
+    if (Math.hypot(a.x - b.x, a.y - b.y) < 20) { fail('Those two taps are too close together. Tap Mark bar by hand and tap the two ends of the bar.'); return; }
+    setBar(a, b, false); setStatus('Bar marked. Tap Analyze.');
+  } else { octx.fillStyle = '#00a7c4'; octx.beginPath(); octx.arc(markPts[0].x, markPts[0].y, SC.vw / 80, 0, 7); octx.fill(); }
+});
+
+/* ---------- geometry ---------- */
+function axes() {
+  let a = SC.bar.p1, b = SC.bar.p2; if (b.x < a.x) [a, b] = [b, a];
+  const L = Math.hypot(b.x - a.x, b.y - a.y), u = { x: (b.x - a.x) / L, y: (b.y - a.y) / L };
+  return { u, n: { x: u.y, y: -u.x }, o: a };
+}
+function hipKnee(f) {
+  if (!f || !f.kp) return null;
+  const avg = (p, q) => { const v = [p, q].filter(z => z && z.s >= 0.3); return v.length ? { x: v.reduce((s, z) => s + z.x, 0) / v.length, y: v.reduce((s, z) => s + z.y, 0) / v.length } : null; };
+  const hip = avg(f.kp.lh, f.kp.rh), knee = avg(f.kp.lk, f.kp.rk);
+  return hip && knee ? { hip, knee } : null;
+}
+function hipH(i) { const hk = hipKnee(SC.frames[i]); if (!hk) return null; const { n } = axes(); return hk.hip.x * n.x + hk.hip.y * n.y; }
+function avgH(i) {
+  let s = 0, c = 0;
+  for (let j = i - 2; j <= i + 2; j++) { if (j < 0 || j >= SC.N) continue; const h = hipH(j); if (h != null) { s += h; c++; } }
+  return c ? s / c : null;
+}
+function theta(line) {
+  const { u, n } = axes(), d = { x: line.h.x - line.k.x, y: line.h.y - line.k.y };
+  return Math.atan2(d.x * n.x + d.y * n.y, Math.abs(d.x * u.x + d.y * u.y)) * 180 / Math.PI;
+}
+
+/* ---------- models ---------- */
+async function loadModels() {
+  if (detector && segmenter) return;
+  if (!window.tf || !window.poseDetection || !window.bodySegmentation) throw new Error('The analysis libraries did not load. Check your connection and reload the page.');
+  setStatus('Loading models (first time only)…', { pct:5 });
+  try { await tf.setBackend('webgl'); await tf.ready(); } catch (e) { throw new Error('WebGL is required but not available in this browser.'); }
+  if (tf.getBackend() !== 'webgl') throw new Error('WebGL is required but not available in this browser.');
+  detector = await poseDetection.createDetector(poseDetection.SupportedModels.MoveNet, {
+    modelType: poseDetection.movenet.modelType.SINGLEPOSE_THUNDER, modelUrl: './model/model.json', enableSmoothing: false });
+  segmenter = await bodySegmentation.createSegmenter(bodySegmentation.SupportedModels.BodyPix, {
+    architecture: 'MobileNetV1', outputStride: 16, multiplier: 1.0, quantBytes: 2, modelUrl: './bodypix/model-stride16.json' });
+}
+const KP = { left_hip:'lh', right_hip:'rh', left_knee:'lk', right_knee:'rk' };
+async function poseFrame(i) {
+  const poses = await detector.estimatePoses(acv, { flipHorizontal:false });
+  SC.stats.pose++;
+  const sx = SC.vw / acv.width, sy = SC.vh / acv.height, kp = {};
+  if (poses[0]) for (const k of poses[0].keypoints) if (KP[k.name]) kp[KP[k.name]] = { x: k.x * sx, y: k.y * sy, s: k.score ?? 0 };
+  SC.frames[i] = Object.assign(SC.frames[i] || {}, { kp });
+}
+async function ensurePose(i) {
+  if (SC.frames[i] && SC.frames[i].kp) return;
+  await grabFrame(i); await poseFrame(i);
+}
+
+/* ---------- outline + thigh-top line ---------- */
+async function bodyParts() {
+  const segs = await segmenter.segmentPeople(acv, { multiSegmentation:false, segmentBodyParts:true, internalResolution:'high', segmentationThreshold:0.5 });
+  SC.stats.seg++;
+  if (!segs.length) return null;
+  const t = await segs[0].mask.toTensor();           // int32 [h, w, 4]
+  const m = tf.tidy(() => {
+    const c0 = t.slice([0, 0, 0], [-1, -1, 1]).squeeze([2]), c3 = t.slice([0, 0, 3], [-1, -1, 1]).squeeze([2]);
+    return tf.where(c3.greater(0), c0, tf.scalar(-1, 'int32'));
+  });
+  const data = await m.data(); const [h, w] = m.shape;
+  t.dispose(); m.dispose();
+  return { data, w, h };
+}
+function fitThigh(px, py, hip, knee) {
+  const n = px.length; if (n < 150) return null;
+  let cx = 0, cy = 0; for (let i = 0; i < n; i++) { cx += px[i]; cy += py[i]; } cx /= n; cy /= n;
+  let sxx = 0, sxy = 0, syy = 0;
+  for (let i = 0; i < n; i++) { const dx = px[i] - cx, dy = py[i] - cy; sxx += dx*dx; sxy += dx*dy; syy += dy*dy; }
+  const ang = 0.5 * Math.atan2(2 * sxy, sxx - syy); let a = { x: Math.cos(ang), y: Math.sin(ang) };
+  if ((hip.x - knee.x) * a.x + (hip.y - knee.y) * a.y < 0) a = { x: -a.x, y: -a.y };
+  let top = { x: a.y, y: -a.x };
+  const front = Math.sign(knee.x - hip.x) || 1;
+  if (-top.y + 0.5 * top.x * front < 0) top = { x: -top.x, y: -top.y };
+  const T = new Float32Array(n), E = new Float32Array(n); let tmin = 1e9, tmax = -1e9;
+  for (let i = 0; i < n; i++) {
+    const dx = px[i] - cx, dy = py[i] - cy, t = dx * a.x + dy * a.y;
+    T[i] = t; E[i] = dx * top.x + dy * top.y; if (t < tmin) tmin = t; if (t > tmax) tmax = t;
+  }
+  const L = tmax - tmin, t0 = tmin + 0.2 * L, t1 = tmin + 0.8 * L, NS = 24, sw = (t1 - t0) / NS, buckets = Array.from({ length: NS }, () => []);
+  for (let i = 0; i < n; i++) if (T[i] >= t0 && T[i] < t1) buckets[Math.min(NS - 1, Math.floor((T[i] - t0) / sw))].push(E[i]);
+  let pts = [];
+  buckets.forEach((b, s) => { if (b.length >= 3) { b.sort((p, q) => p - q); pts.push({ t: t0 + (s + 0.5) * sw, e: b[Math.min(b.length - 1, Math.floor(0.97 * b.length))] }); } });
+  if (pts.length < 10) return null;
+  const lsq = P => {
+    const m = P.length; let st = 0, se = 0, stt = 0, ste = 0;
+    for (const p of P) { st += p.t; se += p.e; stt += p.t * p.t; ste += p.t * p.e; }
+    const den = m * stt - st * st, c1 = den ? (m * ste - st * se) / den : 0; return { c0: (se - c1 * st) / m, c1 };
+  };
+  let f = lsq(pts); const tol = Math.max(1.5, 0.02 * L);
+  for (let it = 0; it < 3; it++) {
+    const keep = pts.filter(p => Math.abs(p.e - (f.c0 + f.c1 * p.t)) <= tol);
+    if (keep.length === pts.length || keep.length < 10) break;
+    pts = keep; f = lsq(pts);
+  }
+  const end = t => ({ x: cx + t * a.x + (f.c0 + f.c1 * t) * top.x, y: cy + t * a.y + (f.c0 + f.c1 * t) * top.y });
+  return { k: end(tmin), h: end(tmax) };
+}
+async function measureFrame(i) {
+  await grabFrame(i);
+  const sx = SC.vw / acv.width, sy = SC.vh / acv.height, f = SC.frames[i];
+  const cnt = { L:0, R:0 }, lines = { L:null, R:null };
+  const seg = await bodyParts();
+  if (seg) {
+    for (const [leg, ids, hk, kk] of [['L', [14, 15], 'lh', 'lk'], ['R', [16, 17], 'rh', 'rk']]) {
+      const px = [], py = [];
+      for (let y = 0; y < seg.h; y++) for (let x = 0; x < seg.w; x++) { const v = seg.data[y * seg.w + x]; if (v === ids[0] || v === ids[1]) { px.push(x); py.push(y); } }
+      cnt[leg] = px.length;
+      const hip = f.kp[hk], knee = f.kp[kk];
+      if (px.length >= 150 && hip && hip.s >= 0.3 && knee) {
+        const ln = fitThigh(px, py, { x: hip.x / sx, y: hip.y / sy }, { x: knee.x / sx, y: knee.y / sy });
+        if (ln) lines[leg] = { k: { x: ln.k.x * sx, y: ln.k.y * sy }, h: { x: ln.h.x * sx, y: ln.h.y * sy } };
+      }
+    }
+  }
+  f.measured = true; f.cnt = cnt; f.lines = lines;
+}
+
+/* ---------- analysis ---------- */
+function detectReps(samples) {
+  const { n } = axes();
+  const raw = samples.map(i => { const hk = hipKnee(SC.frames[i]); if (!hk) return null; const dx = hk.hip.x - hk.knee.x, dy = hk.hip.y - hk.knee.y, L = Math.hypot(dx, dy); return L ? 100 * (dx * n.x + dy * n.y) / L : null; });
+  const v = raw.map((_, k) => { const w = raw.slice(Math.max(0, k - 2), k + 3).filter(z => z != null); return w.length ? median(w) : null; });
+  for (let k = 0; k < v.length; k++) if (v[k] == null) v[k] = k ? v[k - 1] : 100;
+  const reps = []; let cur = null;
+  for (let k = 0; k < v.length; k++) {
+    if (!cur && v[k] < 70) cur = { start: samples[k], open: false };
+    else if (cur && v[k] > 85) { cur.end = samples[k]; reps.push(cur); cur = null; }
+  }
+  if (cur) { cur.end = samples[samples.length - 1]; cur.open = true; reps.push(cur); }
+  return reps.filter(r => (r.end - r.start) / FPS >= 0.2);
+}
+async function analyze() {
+  if (SC.busy || !SC.bar) return;
+  SC.busy = true; setBusy(true); const t0 = performance.now();
+  try {
+    resetResults();
+    await loadModels();
+    SC.frames = new Array(SC.N).fill(null); SC.stats = { pose:0, seg:0 };
+    detector.reset();
+    const samples = [];
+    for (let i = 0; i < SC.N; i += 3) samples.push(i);
+    for (let k = 0; k < samples.length; k++) {
+      setStatus(`Quick scan: frame ${samples[k] + 1} of ${SC.N}`, { pct: 5 + 40 * k / samples.length });
+      await ensurePose(samples[k]);
+    }
+    SC.reps = detectReps(samples);
+    if (!SC.reps.length) { $('tipsNoReps').hidden = false; setStatus('No reps found. See the filming tips below.', { error:true }); return; }
+    for (let r = 0; r < SC.reps.length; r++) {
+      const rep = SC.reps[r], base = 45 + 50 * r / SC.reps.length, span = 50 / SC.reps.length;
+      setStatus(`Rep ${r + 1} of ${SC.reps.length}: finding the lowest frame`, { pct: base });
+      let low0 = null, best = 1e18;
+      for (const i of samples) if (i >= rep.start && i <= rep.end) { const h = hipH(i); if (h != null && h < best) { best = h; low0 = i; } }
+      if (low0 == null) low0 = Math.round((rep.start + rep.end) / 2);
+      detector.reset();
+      const win = []; for (let j = low0 - 3; j <= low0 + 3; j++) if (j >= 0 && j < SC.N) win.push(j);
+      for (const j of win) { setStatus(`Rep ${r + 1}: pinning down the lowest frame (${j + 1})`, { pct: base + span * 0.3 }); await ensurePose(j); }
+      let low = null; best = 1e18;
+      // only frames whose whole ±2 window was analyzed compete, so the ends of the search window aren't favoured
+      for (const j of win) {
+        let full = true; for (let q = Math.max(0, j - 2); q <= Math.min(SC.N - 1, j + 2); q++) if (!SC.frames[q]) full = false;
+        const h = full ? avgH(j) : null; if (h != null && h < best) { best = h; low = j; }
+      }
+      if (low == null) low = low0;
+      rep.low = low; SC.frames[low].low = true;
+      const ms = []; for (let j = low - 2; j <= low + 2; j++) if (j >= 0 && j < SC.N) ms.push(j);
+      rep.measured = ms;
+      for (let q = 0; q < ms.length; q++) {
+        setStatus(`Rep ${r + 1}: measuring thigh angle (frame ${ms[q] + 1})`, { pct: base + span * (0.4 + 0.6 * q / ms.length) });
+        await ensurePose(ms[q]); await measureFrame(ms[q]);
+      }
+    }
+    computeResults(); renderResults();
+    const secs = (performance.now() - t0) / 1000;
+    $('doneInfo').textContent = `Done in ${secs.toFixed(1)} s · ${SC.stats.pose} pose passes, ${SC.stats.seg} outline passes · near leg: ${SC.nearLeg === 'L' ? 'left' : 'right'}`;
+    setStatus(`Done in ${secs.toFixed(1)} s. ${SC.reps.length} rep${SC.reps.length === 1 ? '' : 's'} found.`);
+    showFrame(SC.reps[0].low);
+  } catch (e) {
+    console.error(e); fail('Analysis stopped: ' + (e.message || e) + ' Reload the page and try again, or try a different video.');
+  } finally { SC.busy = false; setBusy(false); }
+}
+function setBusy(b) { for (const id of ['analyzeBtn', 'markBtn', 'pick', 'sampleBtn', 'recBtn']) $(id).disabled = b || (id === 'analyzeBtn' && !SC.bar); }
+function resetResults() {
+  SC.frames = []; SC.reps = []; SC.nearLeg = null; SC.view = 0;
+  $('results').hidden = true; $('tipsNoReps').hidden = true;
+}
+function computeResults() {
+  let L = 0, R = 0;
+  for (const f of SC.frames) if (f && f.cnt) { L += f.cnt.L; R += f.cnt.R; }
+  SC.nearLeg = L >= R ? 'L' : 'R';
+  for (const rep of SC.reps) {
+    rep.thetas = rep.measured.map(i => { const f = SC.frames[i], ln = f && f.lines && f.lines[SC.nearLeg]; return { f: i, th: ln ? theta(ln) : null }; });
+    const used = rep.thetas.filter(t => t.th != null && Math.abs(t.th) <= 30);
+    used.forEach(t => t.used = true);
+    rep.depth = used.length ? median(used.map(t => t.th)) : null;
+  }
+}
+
+/* ---------- rendering ---------- */
+const fmtAngle = a => a == null ? 'n/a' : `${Math.abs(a).toFixed(1)}° ${a > 0 ? 'above' : 'below'}`;
+const fmtT = i => ((i + 0.5) / FPS).toFixed(2) + ' s';
+function renderResults() {
+  $('results').hidden = false;
+  const done = SC.reps.filter(r => r.depth != null), below = done.filter(r => r.depth <= 0);
+  const deepest = done.length ? Math.min(...done.map(r => r.depth)) : null;
+  $('summary').innerHTML = `<div class="stat"><b>${SC.reps.length}</b>Reps found</div><div class="stat"><b>${below.length} of ${SC.reps.length}</b>Below parallel</div><div class="stat"><b>${fmtAngle(deepest)}</b>Deepest rep</div>`;
+  $('repList').innerHTML = SC.reps.map((r, k) => {
+    const ok = r.depth != null, b = !ok ? ['na', 'Not measured'] : r.depth <= 0 ? ['below', 'Below parallel'] : ['above', 'Above parallel'];
+    const used = r.thetas.filter(t => t.used).map(t => t.f + 1);
+    return `<div class="rep"><div><strong>Rep ${k + 1}</strong> <span class="badge ${b[0]}">${b[1]}</span></div><div>${ok ? fmtAngle(r.depth) : 'No thigh outline found'}</div><button type="button" data-view="${r.low}">View</button>
+      <div class="meta">${((r.start + 0.5) / FPS).toFixed(2)}–${((r.end + 0.5) / FPS).toFixed(2)} s · lowest at frame ${r.low + 1} (${fmtT(r.low)}) · frames used: ${used.length ? used[0] + '–' + used[used.length - 1] + ' (' + used.length + ')' : 'none'}${r.open ? ' · ⚠ cut off by the end of the video' : ''}</div></div>`;
+  }).join('');
+  $('repList').querySelectorAll('[data-view]').forEach(b => b.onclick = () => { showFrame(+b.dataset.view); $('stage').scrollIntoView({ block:'center', behavior:'smooth' }); });
+  renderChart(); renderTable(); $('scrub').max = SC.N - 1;
+}
+function renderChart() {
+  const { o, n } = axes(), pts = [];
+  SC.frames.forEach((f, i) => { const hk = hipKnee(f); if (hk) pts.push({ i, h: (hk.hip.x - o.x) * n.x + (hk.hip.y - o.y) * n.y }); });
+  if (!pts.length) { $('chartWrap').textContent = 'No hip data.'; return; }
+  const W = 640, H = 220, P = 34, hs = pts.map(p => p.h), lo = Math.min(0, ...hs), hi = Math.max(0, ...hs), pad = (hi - lo) * 0.1 || 1;
+  const X = i => P + (W - P - 10) * i / Math.max(1, SC.N - 1), Y = h => 10 + (H - 30) * (1 - (h - (lo - pad)) / (hi - lo + 2 * pad));
+  const css = 'currentColor';
+  let s = `<svg viewBox="0 0 ${W} ${H}" aria-hidden="true"><line x1="${P}" x2="${W - 10}" y1="${Y(0)}" y2="${Y(0)}" stroke="var(--bar)" stroke-width="2" stroke-dasharray="5 4"/><text x="${P + 4}" y="${Y(0) - 4}" font-size="11" fill="var(--bar)">safety bar</text>`;
+  s += `<polyline fill="none" stroke="var(--accent)" stroke-width="2" points="${pts.map(p => X(p.i).toFixed(1) + ',' + Y(p.h).toFixed(1)).join(' ')}"/>`;
+  s += pts.map(p => `<circle cx="${X(p.i).toFixed(1)}" cy="${Y(p.h).toFixed(1)}" r="1.8" fill="var(--accent)"/>`).join('');
+  SC.reps.forEach((r, k) => {
+    const h = hipH(r.low); if (h == null) return;
+    const x = X(r.low), y = Y(h + 0 * 1) ;
+    s += `<circle cx="${x}" cy="${y}" r="5" fill="var(--thigh)" stroke="var(--ink)"/><text x="${x}" y="${Math.min(H - 14, y + 18)}" font-size="12" text-anchor="middle" fill="${css}">${k + 1}: ${r.depth == null ? 'n/a' : (r.depth > 0 ? '+' : '') + r.depth.toFixed(1) + '°'}</text>`;
+  });
+  s += `<line id="cursor" x1="${X(SC.view)}" x2="${X(SC.view)}" y1="6" y2="${H - 22}" stroke="var(--ink)" stroke-width="1" opacity=".6"/>`;
+  s += `<text x="${P}" y="${H - 6}" font-size="11" fill="var(--muted)">frame 1</text><text x="${W - 10}" y="${H - 6}" font-size="11" text-anchor="end" fill="var(--muted)">frame ${SC.N}</text></svg>`;
+  $('chartWrap').innerHTML = s;
+  $('chartWrap')._X = { P, W };
+}
+$('chartWrap').addEventListener('click', ev => {
+  const g = $('chartWrap')._X; if (!g || SC.busy) return;
+  const r = $('chartWrap').querySelector('svg').getBoundingClientRect(), x = (ev.clientX - r.left) / r.width * g.W;
+  showFrame(Math.round((x - g.P) / (g.W - g.P - 10) * (SC.N - 1)));
+});
+$('chartWrap').addEventListener('keydown', ev => {
+  const d = ev.key === 'ArrowRight' ? 1 : ev.key === 'ArrowLeft' ? -1 : 0; if (!d || SC.busy) return;
+  ev.preventDefault(); showFrame(SC.view + d * (ev.shiftKey ? 5 : 1));
+});
+function exportRows() {
+  const rows = [];
+  SC.reps.forEach((r, k) => r.thetas.forEach(t => rows.push({ rep: k + 1, frame: t.f + 1, time: ((t.f + 0.5) / FPS).toFixed(2), th: t.th, lowest: t.f === r.low, used: !!t.used })));
+  return rows;
+}
+function renderTable() {
+  $('exTable').innerHTML = '<tr><th>Rep</th><th>Frame</th><th>Time (s)</th><th>Angle</th><th>Lowest</th><th>In median</th></tr>' +
+    exportRows().map(r => `<tr><td>${r.rep}</td><td>${r.frame}</td><td>${r.time}</td><td>${r.th == null ? 'no outline' : fmtAngle(r.th)}</td><td>${r.lowest ? 'yes' : ''}</td><td>${r.used ? 'yes' : 'no'}</td></tr>`).join('');
+}
+$('copyCsv').onclick = async () => {
+  const csv = 'rep,frame,time_s,angle_deg,lowest,in_median\n' + exportRows().map(r => [r.rep, r.frame, r.time, r.th == null ? '' : r.th.toFixed(2), r.lowest, r.used].join(',')).join('\n');
+  try { await navigator.clipboard.writeText(csv); } catch (e) {
+    const ta = document.createElement('textarea'); ta.value = csv; document.body.appendChild(ta); ta.select();
+    try { document.execCommand('copy'); } catch (e2) { $('copyMsg').textContent = 'Copy failed. Select the table and copy it.'; ta.remove(); return; } ta.remove();
+  }
+  $('copyMsg').textContent = 'Copied.';
+};
+
+/* ---------- frame viewer (FR13) ---------- */
+function drawOverlay(i) {
+  octx.clearRect(0, 0, ov.width, ov.height);
+  if (!SC.bar) return;
+  const k = SC.vw / 360;
+  octx.lineCap = 'round'; octx.lineWidth = Math.max(2, 2 * k);
+  octx.strokeStyle = '#00d0f0'; octx.beginPath(); octx.moveTo(SC.bar.p1.x, SC.bar.p1.y); octx.lineTo(SC.bar.p2.x, SC.bar.p2.y); octx.stroke();
+  const f = SC.frames[i], ln = f && f.lines && SC.nearLeg && f.lines[SC.nearLeg];
+  if (ln) {
+    octx.strokeStyle = '#ffa31a'; octx.lineWidth = Math.max(3, 3 * k);
+    octx.beginPath(); octx.moveTo(ln.k.x, ln.k.y); octx.lineTo(ln.h.x, ln.h.y); octx.stroke();
+    octx.font = `700 ${Math.round(16 * k)}px Inter,sans-serif`; octx.fillStyle = '#fff'; octx.strokeStyle = '#000'; octx.lineWidth = 4 * k / 2;
+    const txt = fmtAngle(theta(ln)), x = Math.min(ln.k.x, ln.h.x), y = Math.min(ln.k.y, ln.h.y) - 10 * k;
+    octx.strokeText(txt, x, y); octx.fillText(txt, x, y);
+  }
+}
+async function showFrame(i) {
+  if (!SC.N) return;
+  i = clamp(Math.round(i), 0, SC.N - 1); SC.view = i; $('scrub').value = i;
+  const my = ++viewSeq;
+  octx.clearRect(0, 0, ov.width, ov.height);
+  const c = $('cursor'), g = $('chartWrap')._X;
+  if (c && g) { const x = g.P + (g.W - g.P - 10) * i / Math.max(1, SC.N - 1); c.setAttribute('x1', x); c.setAttribute('x2', x); }
+  await seekTo(i);
+  if (my !== viewSeq) return;                              // a newer scrub superseded this one
+  drawOverlay(i);
+  const f = SC.frames[i], ri = SC.reps.findIndex(r => r.measured && r.measured.includes(i)), ln = f && f.lines && SC.nearLeg && f.lines[SC.nearLeg];
+  let why;
+  if (ln) why = `Measured: ${fmtAngle(theta(ln))}${f.low ? ' (lowest frame of rep ' + (ri + 1) + ')' : ' (rep ' + (ri + 1) + ')'}.`;
+  else if (f && f.measured) why = 'Measured, but no thigh outline was found on this frame.';
+  else if (!SC.reps.length) why = 'Not analyzed yet.';
+  else why = 'Not measured: only the lowest frame of each rep and 2 either side are measured.';
+  $('caption').textContent = `Frame ${i + 1} of ${SC.N} · ${fmtT(i)}. ${why}`;
+}
+$('scrub').addEventListener('input', e => showFrame(+e.target.value));
+$('prevF').onclick = () => showFrame(SC.view - 1);
+$('nextF').onclick = () => showFrame(SC.view + 1);
+
+/* ---------- wiring: sources, recording (FR2) ---------- */
+$('pick').onclick = () => $('file').click();
+$('file').onchange = e => { const f = e.target.files[0]; if (f) fromFile(f); e.target.value = ''; };
+function fromFile(f) {
+  if (f.type && !f.type.startsWith('video/')) { fail('That file is not a video. Choose an MP4 or WebM video.'); return; }
+  loadVideo(URL.createObjectURL(f), true);
+}
+const drop = $('drop');
+['dragenter', 'dragover'].forEach(t => drop.addEventListener(t, e => { e.preventDefault(); drop.classList.add('over'); }));
+['dragleave', 'drop'].forEach(t => drop.addEventListener(t, e => { e.preventDefault(); drop.classList.remove('over'); }));
+drop.addEventListener('drop', e => { const f = e.dataTransfer.files[0]; if (f) fromFile(f); });
+$('sampleBtn').onclick = () => loadVideo('./samples/one-squat.mp4', false);
+$('markBtn').onclick = startMark;
+$('analyzeBtn').onclick = analyze;
+
+let stream = null, mr = null, chunks = [], recTimer = null;
+if (window.self === window.top && navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.MediaRecorder) $('recBtn').hidden = false;
+function stopStream() { if (stream) stream.getTracks().forEach(t => t.stop()); stream = null; $('rec').srcObject = null; clearInterval(recTimer); }
+$('recBtn').onclick = async () => {
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false });
+    $('rec').srcObject = stream; $('recPanel').hidden = false; $('recStart').disabled = false; $('recStop').disabled = true; $('recTime').textContent = '';
+    setStatus('Camera ready. Place the phone side-on, then tap Start recording.');
+  } catch (e) {
+    fail(e && e.name === 'NotAllowedError' ? 'Camera permission was denied. Allow camera access in your browser settings, or upload a video instead.' : 'Could not open the camera (' + (e.name || e) + '). Upload a video instead.');
+  }
+};
+$('recStart').onclick = () => {
+  const mime = ['video/mp4;codecs=avc1', 'video/mp4', 'video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'].find(m => MediaRecorder.isTypeSupported(m));
+  chunks = [];
+  try { mr = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined); } catch (e) { fail('This browser could not start recording. Upload a video instead.'); return; }
+  mr.ondataavailable = e => { if (e.data.size) chunks.push(e.data); };
+  mr.onstop = () => {
+    const blob = new Blob(chunks, { type: mr.mimeType || mime || 'video/webm' });
+    stopStream(); $('recPanel').hidden = true;
+    if (!blob.size) { fail('Nothing was recorded. Try again.'); return; }
+    loadVideo(URL.createObjectURL(blob), true);
+  };
+  mr.start(); const t0 = Date.now();
+  recTimer = setInterval(() => { $('recTime').textContent = '● ' + ((Date.now() - t0) / 1000).toFixed(0) + ' s'; }, 500);
+  $('recStart').disabled = true; $('recStop').disabled = false; setStatus('Recording… tap Stop when the set is done.');
+};
+$('recStop').onclick = () => { if (mr && mr.state !== 'inactive') mr.stop(); };
+$('recCancel').onclick = () => { if (mr && mr.state === 'recording') { mr.onstop = null; mr.stop(); } stopStream(); $('recPanel').hidden = true; setStatus('Recording cancelled.'); };
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && SC.busy) setStatus('Resuming…'); });
+</script>
+</body>
+</html>
