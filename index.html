@@ -56,6 +56,13 @@ table{border-collapse:collapse;width:100%;font-size:.9rem}
 th,td{text-align:left;border-bottom:1px solid var(--line);padding:5px 8px}
 input[type=range]{width:100%;accent-color:var(--accent)}
 #caption{min-height:2.7em;margin:8px 0}
+.sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+details>summary{cursor:pointer}
+#headline{font:700 2rem/1.2 "Space Grotesk",sans-serif;margin:0 0 10px}
+#headline small{display:block;font:500 .95rem Inter,sans-serif;color:var(--muted);margin-top:2px}
+#headline.ok{color:var(--good)} #headline.mixed{color:var(--ink)}
+.stat.valid{background:var(--good-bg);border-color:transparent;color:var(--good)} .stat.invalid{background:var(--bad-bg);border-color:transparent;color:var(--bad)}
+.stat span{display:block;font-size:.85rem}
 </style>
 </head>
 <body>
@@ -66,7 +73,7 @@ input[type=range]{width:100%;accent-color:var(--accent)}
 </header>
 
 <section class="card" aria-labelledby="srcH">
-  <h2 id="srcH">1 · Choose a video</h2>
+  <h2 id="srcH" class="sr-only">Choose a video</h2>
   <div id="drop">
     <p style="margin:0 0 10px">Drag a video here, or</p>
     <div class="row" style="justify-content:center">
@@ -85,27 +92,43 @@ input[type=range]{width:100%;accent-color:var(--accent)}
       <span id="recTime" class="muted small" aria-live="off"></span>
     </div>
   </div>
-  <div class="tips small" style="margin-top:12px">
-    <strong>Filming tips</strong>
+  <details class="small" style="margin-top:10px">
+    <summary>Filming tips</summary>
     <ul>
-      <li>Film side-on, with the phone propped at about hip height and the camera held still.</li>
+      <li>Film side-on, with the phone propped at about hip height, level and held still.</li>
       <li>Keep the whole lifter and the near safety bar in frame, including the knee at the bottom.</li>
       <li>Use a power rack with safety bars set at parallel; one lifter in view.</li>
     </ul>
-  </div>
+  </details>
 </section>
 
 <div id="status" role="status" aria-live="polite"><span id="statusText">Choose a video to begin.</span><progress id="prog" max="100" value="0" hidden></progress></div>
 
 <div id="workArea" hidden>
-<section class="card" aria-labelledby="barH">
-  <h2 id="barH">2 · Safety bar and analysis</h2>
+<section id="summaryCard" class="card" aria-labelledby="sumH" hidden>
+  <h2 id="sumH" class="sr-only">Result</h2>
+  <div id="headline"></div>
+  <div class="stats" id="summary"></div>
+  <p id="warnInfo" class="small" hidden style="margin:.6em 0 0;padding:8px 12px;border-radius:8px;background:var(--bad-bg);color:var(--bad)"></p>
+  <p id="doneInfo" class="muted small" style="margin:.6em 0 0"></p>
+</section>
+
+<section class="card" aria-label="Video">
   <div id="stage"><div id="zoomLayer"><video id="video" muted playsinline preload="auto"></video><canvas id="ov"></canvas></div></div>
-  <p id="barInfo" class="muted small" style="text-align:center"></p>
-  <div class="row" style="justify-content:center">
-    <button id="markBtn" type="button">Mark bar by hand</button>
-    <button id="analyzeBtn" class="primary" type="button">Re-analyze</button>
+  <div id="viewerCtl" hidden>
+    <input id="scrub" type="range" min="0" max="0" value="0" aria-label="Frame" style="margin-top:8px">
+    <div class="row" style="margin-top:4px">
+      <button id="prevF" type="button">◀ Prev</button><button id="nextF" type="button">Next ▶</button>
+      <button id="drawBtn" type="button">Draw thigh line</button><button id="clearDraw" type="button">Clear drawn line</button>
+    </div>
+    <p id="drawHint" class="muted small" hidden></p>
+    <div id="caption" aria-live="polite"></div>
   </div>
+  <div class="row" style="margin-top:8px">
+    <button id="markBtn" type="button">Mark bar by hand</button>
+    <button id="analyzeBtn" type="button">Re-analyze</button>
+  </div>
+  <p id="barInfo" class="muted small"></p>
   <div id="tipsNoReps" class="tips small" hidden style="margin-top:12px">
     <strong>No reps found.</strong> Check that:
     <ul><li>the lifter's hips and knees are visible for the whole set;</li><li>the camera is side-on and steady;</li><li>the set includes at least one full dip and return to standing.</li></ul>
@@ -113,14 +136,8 @@ input[type=range]{width:100%;accent-color:var(--accent)}
 </section>
 
 <div id="results" hidden>
-<section class="card" aria-labelledby="sumH">
-  <h2 id="sumH">Summary</h2>
-  <div class="stats" id="summary"></div>
-  <p id="warnInfo" class="small" hidden style="margin:.6em 0 0;padding:8px 12px;border-radius:8px;background:var(--bad-bg);color:var(--bad)"></p>
-  <p id="doneInfo" class="muted small"></p>
-</section>
 <section class="card" aria-labelledby="repH">
-  <h2 id="repH">Rep verdicts</h2>
+  <h2 id="repH">Each rep</h2>
   <div id="repList"></div>
 </section>
 <section class="card" aria-labelledby="chH">
@@ -128,22 +145,11 @@ input[type=range]{width:100%;accent-color:var(--accent)}
   <p class="muted small">Hip height above the safety bar for the whole set. Click the chart, or focus it and use ← → to step frames.</p>
   <div id="chartWrap" tabindex="0" role="img" aria-label="Hip height chart. Use left and right arrow keys to step frames."></div>
 </section>
-<section class="card" aria-labelledby="vwH">
-  <h2 id="vwH">Frame viewer</h2>
-  <p>Use the video above: the line and angle are drawn on measured frames.</p>
-  <input id="scrub" type="range" min="0" max="0" value="0" aria-label="Frame">
-  <div class="row" style="margin-top:6px">
-    <button id="prevF" type="button">◀ Prev</button><button id="nextF" type="button">Next ▶</button>
-    <button id="drawBtn" type="button">Draw thigh line</button><button id="clearDraw" type="button">Clear drawn line</button>
-  </div>
-  <p id="drawHint" class="muted small" hidden></p>
-  <div id="caption" aria-live="polite"></div>
-</section>
-<section class="card" aria-labelledby="exH">
-  <h2 id="exH">Export</h2>
-  <div class="row"><button id="copyCsv" type="button">Copy as CSV</button><span id="copyMsg" class="muted small" role="status"></span></div>
+<details class="card" id="exportCard">
+  <summary><strong>Export measured frames</strong></summary>
+  <div class="row" style="margin-top:8px"><button id="copyCsv" type="button">Copy as CSV</button><span id="copyMsg" class="muted small" role="status"></span></div>
   <div style="overflow-x:auto;margin-top:8px"><table id="exTable"></table></div>
-</section>
+</details>
 </div>
 </div>
 </main>
@@ -655,12 +661,12 @@ async function finishAnalysis() {
   const secs = (performance.now() - t0) / 1000;
   $('doneInfo').textContent = `Done in ${secs.toFixed(1)} s · ${SC.stats.pose} pose passes, ${SC.stats.seg} outline passes · near leg: ${SC.nearLeg === 'L' ? 'left' : 'right'}`;
   setStatus(`Done in ${secs.toFixed(1)} s. ${SC.reps.length} rep${SC.reps.length === 1 ? '' : 's'} found.`);
-  showFrame(SC.reps[0].low);
+  showFrame(SC.reps[0].low); $('summaryCard').scrollIntoView({ block:'start', behavior:'smooth' });
 }
 function setBusy(b) { for (const id of ['analyzeBtn', 'markBtn', 'pick', 'sampleBtn', 'recBtn']) $(id).disabled = b; }
 function resetResults() {
   SC.frames = []; SC.reps = []; SC.nearLeg = null; SC.view = 0; SC.manual = {}; drawPts = null;
-  $('results').hidden = true; $('tipsNoReps').hidden = true;
+  $('results').hidden = true; $('summaryCard').hidden = true; $('viewerCtl').hidden = true; $('tipsNoReps').hidden = true;
 }
 function computeResults() {
   let L = 0, R = 0;
@@ -688,15 +694,17 @@ function computeResults() {
 const fmtAngle = a => a == null ? 'n/a' : `${Math.abs(a).toFixed(1)}° ${a > 0 ? 'above' : 'below'}`;
 const fmtT = i => ((i + 0.5) / FPS).toFixed(2) + ' s';
 function renderResults() {
-  $('results').hidden = false; $('warnInfo').textContent = SC.warn || ''; $('warnInfo').hidden = !SC.warn;
-  const done = SC.reps.filter(r => r.depth != null), below = done.filter(r => r.depth <= 0);
+  $('results').hidden = false; $('summaryCard').hidden = false; $('viewerCtl').hidden = false; $('warnInfo').textContent = SC.warn || ''; $('warnInfo').hidden = !SC.warn;
+  const total = SC.reps.length, done = SC.reps.filter(r => r.depth != null), valid = done.filter(r => r.depth <= 0).length, invalid = done.length - valid, unmeasured = total - done.length;
   const deepest = done.length ? Math.min(...done.map(r => r.depth)) : null;
-  $('summary').innerHTML = `<div class="stat"><b>${SC.reps.length}</b>Reps found</div><div class="stat"><b>${below.length} of ${SC.reps.length}</b>Below parallel</div><div class="stat"><b>${fmtAngle(deepest)}</b>Deepest rep</div>`;
+  $('headline').className = valid === total ? 'ok' : 'mixed';
+  $('headline').innerHTML = `${valid} of ${total} rep${total === 1 ? '' : 's'} below parallel<small>${valid === total ? 'Every rep reached depth.' : invalid + ' rep' + (invalid === 1 ? '' : 's') + ' stopped above parallel.'}${unmeasured ? ' ' + unmeasured + ' could not be measured.' : ''}</small>`;
+  $('summary').innerHTML = `<div class="stat"><b>${total}</b>Total reps</div><div class="stat valid"><b>${valid}</b>✓ Valid<span>below parallel</span></div><div class="stat invalid"><b>${invalid}</b>✗ Not valid<span>above parallel</span></div><div class="stat"><b>${fmtAngle(deepest)}</b>Deepest rep</div>`;
   $('repList').innerHTML = SC.reps.map((r, k) => {
-    const ok = r.depth != null, b = !ok ? ['na', 'Not measured'] : r.depth <= 0 ? ['below', 'Below parallel'] : ['above', 'Above parallel'];
+    const ok = r.depth != null, b = !ok ? ['na', '? Not measured'] : r.depth <= 0 ? ['below', '✓ Below parallel'] : ['above', '✗ Above parallel'];
     const used = r.thetas.filter(t => t.used).map(t => t.f + 1);
-    return `<div class="rep"><div><strong>Rep ${k + 1}</strong> <span class="badge ${b[0]}">${b[1]}</span></div><div>${ok ? fmtAngle(r.depth) + (r.hand != null ? ' (hand-drawn; auto ' + fmtAngle(r.auto) + ')' : '') : 'No thigh outline found'}</div><button type="button" data-view="${r.low}">View</button>
-      <div class="meta">${((r.start + 0.5) / FPS).toFixed(2)}–${((r.end + 0.5) / FPS).toFixed(2)} s · lowest at frame ${r.low + 1} (${fmtT(r.low)}) · frames used: ${used.length ? used[0] + '–' + used[used.length - 1] + ' (' + used.length + ')' : 'none'}${r.open ? ' · ⚠ cut off by the end of the video' : ''}<br>Depth from: ${r.method === 'hand' ? 'your hand-drawn line' : r.method === 'joint' ? 'joint line −' + JOINT_OFFSET + '° (the outline fit read ' + fmtAngle(r.outline) + ' and disagreed with the joints, so it was not used)' : 'thigh outline fit' + (r.joint != null ? ' (agrees with joint line to ' + Math.abs(r.outline - r.joint).toFixed(1) + '°)' : '')}</div></div>`;
+    return `<div class="rep"><div><strong>Rep ${k + 1}</strong> <span class="badge ${b[0]}">${b[1]}</span></div><div>${ok ? fmtAngle(r.depth) + (r.hand != null ? ' (hand-drawn)' : '') : 'No thigh outline found'}</div><button type="button" data-view="${r.low}">View</button>
+      <details class="meta"><summary>How this was measured</summary>${((r.start + 0.5) / FPS).toFixed(2)}–${((r.end + 0.5) / FPS).toFixed(2)} s · lowest at frame ${r.low + 1} (${fmtT(r.low)}) · outline frames used: ${used.length ? used[0] + '–' + used[used.length - 1] + ' (' + used.length + ')' : 'none'}${r.open ? ' · ⚠ cut off by the end of the video' : ''}<br>Depth from: ${r.method === 'hand' ? 'your hand-drawn line (automatic reading: ' + fmtAngle(r.auto) + ')' : r.method === 'joint' ? 'joint line −' + JOINT_OFFSET + '° (the outline fit read ' + fmtAngle(r.outline) + ' and disagreed with the joints, so it was not used)' : 'thigh outline fit' + (r.joint != null ? ' (agrees with joint line to ' + Math.abs(r.outline - r.joint).toFixed(1) + '°)' : '')}</details></div>`;
   }).join('');
   $('repList').querySelectorAll('[data-view]').forEach(b => b.onclick = () => { showFrame(+b.dataset.view); $('stage').scrollIntoView({ block:'center', behavior:'smooth' }); });
   renderChart(); renderTable(); $('scrub').max = SC.N - 1;
