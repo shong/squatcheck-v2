@@ -121,7 +121,7 @@ details>summary{cursor:pointer}
     <input id="scrub" type="range" min="0" max="0" value="0" aria-label="Frame" style="margin-top:8px">
     <div class="row" style="margin-top:4px">
       <button id="prevF" type="button">◀ Prev</button><button id="nextF" type="button">Next ▶</button>
-      <button id="drawBtn" type="button">Draw thigh line</button><button id="clearDraw" type="button">Clear drawn line</button>
+      <button id="traceBtn" type="button">Trace barbell (rep 1)</button><button id="drawBtn" type="button">Draw thigh line</button><button id="clearDraw" type="button">Clear drawn line</button>
     </div>
     <p id="drawHint" class="muted small" hidden></p>
     <div id="caption" aria-live="polite"></div>
@@ -338,6 +338,7 @@ function ovPoint(ev) {
   return { x: clamp((ev.clientX - ox) / s, 0, SC.vw), y: clamp((ev.clientY - oy) / s, 0, SC.vh) };
 }
 ov.addEventListener('click', ev => {
+  if (traceMode) { runTrace(ovPoint(ev)); return; }
   if (drawPts) {
     drawPts.push(ovPoint(ev));
     if (drawPts.length === 2) {
@@ -552,6 +553,64 @@ async function measureFrame(i) {                           // the frame is alrea
   f.measured = true; f.cnt = cnt; f.lines = lines; f.sil = sil;
 }
 
+/* ---------- barbell path: follow the end of the barbell through a rep (you tap it once, the app follows it) ---------- */
+const TW = 240, TR = 22, TS = 14, tc = document.createElement('canvas'), tctx = tc.getContext('2d', { willReadFrequently:true });
+function grayOf(src) {
+  const w = TW, h = Math.round(src.height * TW / src.width); tc.width = w; tc.height = h; tctx.drawImage(src, 0, 0, w, h);
+  const d = tctx.getImageData(0, 0, w, h).data, g = new Float32Array(w * h);
+  for (let p = 0; p < w * h; p++) g[p] = 0.299 * d[4*p] + 0.587 * d[4*p+1] + 0.114 * d[4*p+2];
+  return { g, w, h };
+}
+// Where did the patch around p in frame a move to in frame b? Zero-mean SSD over a +-TS px search around the predicted spot.
+function trackStep(a, b, p, v) {
+  const { w, h } = a, cx = Math.round(p.x), cy = Math.round(p.y);
+  const R = Math.min(TR, cx, cy, w - 1 - cx, h - 1 - cy); if (R < 8) return { x: p.x + v.x, y: p.y + v.y, lost: true };
+  const px = [], py = []; for (let y = -R; y <= R; y += 2) for (let x = -R; x <= R; x += 2) { px.push(x); py.push(y); }
+  const n = px.length, ta = new Float32Array(n); let ma = 0;
+  for (let k = 0; k < n; k++) { ta[k] = a.g[(cy + py[k]) * w + cx + px[k]]; ma += ta[k]; } ma /= n;
+  const ox = Math.round(v.x), oy = Math.round(v.y), cost = new Map(); let best = null;
+  for (let dy = oy - TS; dy <= oy + TS; dy++) for (let dx = ox - TS; dx <= ox + TS; dx++) {
+    const X = cx + dx, Y = cy + dy; if (X - R < 0 || Y - R < 0 || X + R >= w || Y + R >= h) continue;
+    let mb = 0; for (let k = 0; k < n; k++) mb += b.g[(Y + py[k]) * w + X + px[k]]; mb /= n;
+    let c = 0; for (let k = 0; k < n; k++) { const d = (ta[k] - ma) - (b.g[(Y + py[k]) * w + X + px[k]] - mb); c += d * d; }
+    cost.set(dx + ',' + dy, c); if (!best || c < best.c) best = { dx, dy, c };
+  }
+  if (!best) return { x: p.x + v.x, y: p.y + v.y, lost: true };
+  const q = (m, z, pl) => { const d = m + pl - 2 * z; return d > 1e-6 ? 0.5 * (m - pl) / d : 0; };   // parabola vertex for sub-pixel
+  const g = (dx, dy) => cost.get(dx + ',' + dy), c0 = best.c;
+  const sx = g(best.dx - 1, best.dy) != null && g(best.dx + 1, best.dy) != null ? q(g(best.dx - 1, best.dy), c0, g(best.dx + 1, best.dy)) : 0;
+  const sy = g(best.dx, best.dy - 1) != null && g(best.dx, best.dy + 1) != null ? q(g(best.dx, best.dy - 1), c0, g(best.dx, best.dy + 1)) : 0;
+  return { x: p.x + best.dx + clamp(sx, -1, 1), y: p.y + best.dy + clamp(sy, -1, 1), lost: false };
+}
+async function traceBar(k, start) {                        // start: the tapped point in video pixels, on the rep's first frame
+  const rep = SC.reps[k]; if (!rep) return;
+  const list = []; for (let i = rep.start; i <= rep.end; i++) list.push(i);
+  const pts = []; let prevG = null, p = null, v = { x: 0, y: 0 };
+  await forFrames(list, async (i, q) => {
+    setStatus(`Tracing the barbell, rep ${k + 1}: frame ${i + 1}`, { pct: 100 * q / list.length });
+    const gr = grayOf(acv);
+    if (!p) p = { x: start.x * gr.w / SC.vw, y: start.y * gr.h / SC.vh, lost: false };
+    else { const np = trackStep(prevG, gr, p, v); v = { x: 0.6 * v.x + 0.4 * (np.x - p.x), y: 0.6 * v.y + 0.4 * (np.y - p.y) }; p = np; }
+    prevG = gr; pts.push({ f: i, x: p.x * SC.vw / gr.w, y: p.y * SC.vh / gr.h, lost: !!p.lost });
+  });
+  const sm = pts.map((c, q) => { const w = pts.slice(Math.max(0, q - 1), q + 2); return Object.assign({}, c, { x: w.reduce((a, b) => a + b.x, 0) / w.length, y: w.reduce((a, b) => a + b.y, 0) / w.length }); });
+  SC.barPath = { rep: k, pts: sm };
+}
+let traceMode = false;
+$('traceBtn').onclick = () => {
+  if (SC.busy || !SC.reps.length) return;
+  if (traceMode) { traceMode = false; $('stage').classList.remove('marking'); $('drawHint').hidden = true; return; }
+  traceMode = true; drawPts = null; markPts = null; $('stage').classList.add('marking'); $('drawHint').hidden = false;
+  $('drawHint').textContent = "Tap the end of the barbell (the centre of the plate). Rep 1's first frame is shown. Press Trace barbell again to cancel.";
+  SC.barPath = null; showFrame(SC.reps[0].start);
+};
+async function runTrace(pt) {
+  traceMode = false; $('stage').classList.remove('marking'); $('drawHint').hidden = true;
+  await guarded(async () => { await traceBar(0, pt); });
+  setStatus(SC.barPath ? 'Barbell path traced for rep 1 (yellow line).' : 'Could not trace the barbell.');
+  showFrame(SC.reps[0].start);
+}
+
 /* ---------- analysis ---------- */
 function detectReps(samples) {
   const { n } = axes();
@@ -667,7 +726,7 @@ async function finishAnalysis() {
 }
 function setBusy(b) { for (const id of ['analyzeBtn', 'markBtn', 'pick', 'sampleBtn', 'recBtn']) $(id).disabled = b; }
 function resetResults() {
-  SC.frames = []; SC.reps = []; SC.nearLeg = null; SC.view = 0; SC.manual = {}; drawPts = null;
+  SC.frames = []; SC.reps = []; SC.nearLeg = null; SC.view = 0; SC.manual = {}; drawPts = null; SC.barPath = null;
   $('results').hidden = true; $('summaryCard').hidden = true; $('viewerCtl').hidden = true; $('tipsNoReps').hidden = true;
 }
 function computeResults() {
@@ -769,6 +828,16 @@ function drawOverlay(i) {
   const k = SC.vw / 360;
   octx.lineCap = 'round'; octx.lineWidth = Math.max(2, 2 * k);
   if (!SC.assumedLevel) { octx.strokeStyle = '#00d0f0'; octx.beginPath(); octx.moveTo(SC.bar.p1.x, SC.bar.p1.y); octx.lineTo(SC.bar.p2.x, SC.bar.p2.y); octx.stroke(); }   // nothing to draw when level is assumed
+  if (SC.barPath && !drawPts) {                            // barbell-end path for rep 1 (yellow), with the plate outline at this frame
+    const P = SC.barPath.pts; octx.lineJoin = 'round';
+    for (const [col, wd] of [['#000', 5], ['#ffe14d', 3]]) {
+      octx.strokeStyle = col; octx.lineWidth = Math.max(wd, wd * k); octx.beginPath();
+      P.forEach((p, q) => q ? octx.lineTo(p.x, p.y) : octx.moveTo(p.x, p.y)); octx.stroke();
+    }
+    const cur = P.reduce((b, p) => Math.abs(p.f - i) < Math.abs(b.f - i) ? p : b, P[0]);
+    if (Math.abs(cur.f - i) <= 1) { octx.fillStyle = '#ffe14d'; octx.strokeStyle = '#000'; octx.lineWidth = Math.max(2, 2 * k); octx.beginPath(); octx.arc(cur.x, cur.y, Math.max(6, 6 * k), 0, 7); octx.fill(); octx.stroke(); }
+    octx.fillStyle = '#fff'; octx.strokeStyle = '#000'; octx.lineWidth = Math.max(2, 2 * k); octx.beginPath(); octx.arc(P[0].x, P[0].y, Math.max(4, 4 * k), 0, 7); octx.fill(); octx.stroke();
+  }
   const rr = SC.reps.find(r => r.measured && r.measured.includes(i)), useJoint = !!rr && rr.method === 'joint';
   const mn = SC.manual && SC.manual[i];
   if (mn) {
@@ -817,7 +886,7 @@ async function showFrame(i) {
   else if (!SC.reps.length) why = 'Not analyzed yet.';
   else why = 'Not measured: only the lowest frame of each rep and 2 either side are measured.';
   const jt = jointTheta(i), hand = SC.manual && SC.manual[i];
-  $('caption').textContent = `Frame ${i + 1} of ${SC.N} · ${fmtT(i)}. ${why}` + (jt != null ? ` Joint line (hip to knee): ${fmtAngle(jt)}; estimate from joints (pink line): ${fmtAngle(jt - JOINT_OFFSET)}.` : '') + (hand ? ` Hand-drawn: ${fmtAngle(theta(hand))}.` : '');
+  $('caption').textContent = `Frame ${i + 1} of ${SC.N} · ${fmtT(i)}. ${why}` + (jt != null ? ` Joint line (hip to knee): ${fmtAngle(jt)}; estimate from joints (pink line): ${fmtAngle(jt - JOINT_OFFSET)}.` : '') + (hand ? ` Hand-drawn: ${fmtAngle(theta(hand))}.` : '') + (SC.barPath ? ' Yellow: path of the barbell end, rep ' + (SC.barPath.rep + 1) + '.' : '');
 }
 $('scrub').addEventListener('input', e => showFrame(+e.target.value));
 // Zoom the stage onto the near leg (hip and knee plus a margin) so the thigh is easier to trace.
