@@ -360,7 +360,7 @@ function avgH(i) {
 }
 // The pose model's hip-to-knee line is steady but reads ~5 deg steeper than the thigh's top surface. It is the fallback
 // when the outline fit disagrees with it by more than DISAGREE degrees (outline fits go wrong when the torso overlaps a dark thigh).
-const JOINT_OFFSET = 5, DISAGREE = 4;
+const JOINT_OFFSET = 5, DISAGREE = 2.5;
 function jointTheta(i) {                                   // pose-model hip to knee, near leg; for comparison only
   const f = SC.frames[i], k = f && f.kp, a = SC.nearLeg === 'R' ? 'rh' : 'lh', b = SC.nearLeg === 'R' ? 'rk' : 'lk';
   if (!k || !k[a] || !k[b] || k[a].s < 0.3 || !SC.bar) return null;
@@ -634,6 +634,10 @@ async function finishAnalysis() {
     if (low == null) low = low0;
     if (!SC.frames[low]) { await grabFrame(low); await poseFrame(low); }
     rep.low = low; SC.frames[low].low = true;
+    // the joint-based reading uses a wider window (low ±4): the angle really changes by a few degrees across the bottom,
+    // and a wider median keeps the answer from moving when the scan lands a frame or two differently
+    rep.jointWin = []; for (let j = low - 4; j <= low + 4; j++) if (j >= 0 && j < SC.N) rep.jointWin.push(j);
+    await forFrames(rep.jointWin.filter(j => !(SC.frames[j] && SC.frames[j].kp)), j => poseFrame(j));
     const ms = []; for (let j = low - 2; j <= low + 2; j++) if (j >= 0 && j < SC.N) ms.push(j);
     rep.measured = ms;
     for (let q = 0; q < ms.length; q++) {
@@ -665,7 +669,9 @@ function computeResults() {
     used.forEach(t => t.used = true);
     rep.depth = used.length ? median(used.map(t => t.th)) : null;
     rep.outline = rep.depth;
-    const jv = rep.measured.map(jointTheta).filter(v => v != null), jest = jv.length ? median(jv) - JOINT_OFFSET : null;
+    const jv = (rep.jointWin || rep.measured).map(jointTheta).filter(v => v != null);
+    // deepest moment: the lowest value of the 3-frame running median (a single glitchy frame can't set it)
+    const sm = jv.map((_, q) => median(jv.slice(Math.max(0, q - 1), q + 2))), jest = jv.length ? (jv.length >= 3 ? Math.min(...sm) : median(jv)) - JOINT_OFFSET : null;
     rep.joint = jest; rep.method = 'outline';
     if (jest != null && (rep.outline == null || Math.abs(rep.outline - jest) > DISAGREE)) { rep.depth = jest; rep.method = 'joint'; }
     rep.auto = rep.depth;
