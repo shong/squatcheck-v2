@@ -125,6 +125,7 @@ details>summary{cursor:pointer}
     </div>
     <p id="drawHint" class="muted small" hidden></p>
     <div id="caption" aria-live="polite"></div>
+    <p id="pathInfo" class="small" hidden style="margin:0 0 8px"></p>
   </div>
   <div class="row" style="margin-top:8px">
     <button id="markBtn" type="button">Mark bar by hand</button>
@@ -408,7 +409,7 @@ function loadModels(quiet) {
   return modelsP;
 }
 const SEG_OPTS = { multiSegmentation:false, segmentBodyParts:true, internalResolution:'high', segmentationThreshold:0.5 };
-const KP = { left_hip:'lh', right_hip:'rh', left_knee:'lk', right_knee:'rk' };
+const KP = { left_hip:'lh', right_hip:'rh', left_knee:'lk', right_knee:'rk', left_ankle:'la', right_ankle:'ra' };
 async function poseFrame(i) {
   const poses = await detector.estimatePoses(acv, { flipHorizontal:false });
   SC.stats.pose++;
@@ -594,7 +595,17 @@ async function traceBar(k, start) {                        // start: the tapped 
     prevG = gr; pts.push({ f: i, x: p.x * SC.vw / gr.w, y: p.y * SC.vh / gr.h, lost: !!p.lost });
   });
   const sm = pts.map((c, q) => { const w = pts.slice(Math.max(0, q - 1), q + 2); return Object.assign({}, c, { x: w.reduce((a, b) => a + b.x, 0) / w.length, y: w.reduce((a, b) => a + b.y, 0) / w.length }); });
-  SC.barPath = { rep: k, pts: sm };
+  SC.barPath = { rep: k, pts: sm, ref: null, info: '' };
+  // plumb line: straight up from the near-leg ankle (the planted foot) - how far does the bar wander from it?
+  const key = SC.nearLeg === 'R' ? 'ra' : 'la', as = [];
+  for (let i = rep.start; i <= rep.end; i++) { const f = SC.frames[i], a = f && f.kp && f.kp[key]; if (a && a.s >= 0.3) as.push(a); }
+  if (as.length >= 3 && SC.bar) {
+    const ref = { x: median(as.map(a => a.x)), y: median(as.map(a => a.y)) }, { u } = axes();
+    const d = sm.map(q => (q.x - ref.x) * u.x + (q.y - ref.y) * u.y), mn = Math.min(...d), mx = Math.max(...d), st = d[0];
+    const side = v => Math.abs(v) < 1 ? 'on the line' : Math.abs(Math.round(v)) + ' px ' + (v > 0 ? 'right' : 'left') + ' of the line';
+    SC.barPath.ref = ref;
+    SC.barPath.info = `Bar path, rep ${k + 1}: starts ${side(st)}, ends ${side(d[d.length - 1])}; sideways travel ${(mx - mn).toFixed(0)} px (from ${side(mn)} to ${side(mx)}). The dashed line goes straight up from the planted ankle.`;
+  } else SC.barPath.info = `Bar path, rep ${k + 1}: no foot reference was found, so only the path is drawn.`;
 }
 let traceMode = false;
 $('traceBtn').onclick = () => {
@@ -602,12 +613,13 @@ $('traceBtn').onclick = () => {
   if (traceMode) { traceMode = false; $('stage').classList.remove('marking'); $('drawHint').hidden = true; return; }
   traceMode = true; drawPts = null; markPts = null; $('stage').classList.add('marking'); $('drawHint').hidden = false;
   $('drawHint').textContent = "Tap the end of the barbell (the centre of the plate). Rep 1's first frame is shown. Press Trace barbell again to cancel.";
-  SC.barPath = null; showFrame(SC.reps[0].start);
+  SC.barPath = null; $('pathInfo').hidden = true; showFrame(SC.reps[0].start);
 };
 async function runTrace(pt) {
   traceMode = false; $('stage').classList.remove('marking'); $('drawHint').hidden = true;
   await guarded(async () => { await traceBar(0, pt); });
   setStatus(SC.barPath ? 'Barbell path traced for rep 1 (yellow line).' : 'Could not trace the barbell.');
+  $('pathInfo').textContent = SC.barPath ? SC.barPath.info : ''; $('pathInfo').hidden = !SC.barPath;
   showFrame(SC.reps[0].start);
 }
 
@@ -830,6 +842,12 @@ function drawOverlay(i) {
   if (!SC.assumedLevel) { octx.strokeStyle = '#00d0f0'; octx.beginPath(); octx.moveTo(SC.bar.p1.x, SC.bar.p1.y); octx.lineTo(SC.bar.p2.x, SC.bar.p2.y); octx.stroke(); }   // nothing to draw when level is assumed
   if (SC.barPath && !drawPts) {                            // barbell-end path for rep 1 (yellow), with the plate outline at this frame
     const P = SC.barPath.pts; octx.lineJoin = 'round';
+    if (SC.barPath.ref) {
+      const { n } = axes(), r0 = SC.barPath.ref, top = Math.min(...P.map(q => q.y)) - 40 * k, tUp = Math.max(60, (r0.y - top) / Math.max(0.3, Math.abs(n.y))), tDn = 25 * k;
+      octx.setLineDash([10 * k, 7 * k]);
+      for (const [col, wd] of [['#000', 4], ['#fff', 2]]) { octx.strokeStyle = col; octx.lineWidth = Math.max(wd, wd * k); octx.beginPath(); octx.moveTo(r0.x + n.x * tUp, r0.y + n.y * tUp); octx.lineTo(r0.x - n.x * tDn, r0.y - n.y * tDn); octx.stroke(); }
+      octx.setLineDash([]);
+    }
     for (const [col, wd] of [['#000', 5], ['#ffe14d', 3]]) {
       octx.strokeStyle = col; octx.lineWidth = Math.max(wd, wd * k); octx.beginPath();
       P.forEach((p, q) => q ? octx.lineTo(p.x, p.y) : octx.moveTo(p.x, p.y)); octx.stroke();
