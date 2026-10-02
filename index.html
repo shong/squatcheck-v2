@@ -537,12 +537,14 @@ function largestBlob(seg, ids) {
 }
 async function measureFrame(i) {                           // the frame is already on acv
   const sx = SC.vw / acv.width, sy = SC.vh / acv.height, f = SC.frames[i];
-  const cnt = { L:0, R:0 }, lines = { L:null, R:null }, sil = { L:null, R:null };
+  const cnt = { L:0, R:0 }, lines = { L:null, R:null }, sil = { L:null, R:null }, foot = { L:null, R:null };
   const seg = await bodyParts();
   if (seg) {
     for (const [leg, ids, hk, kk] of [['L', [14, 15], 'lh', 'lk'], ['R', [16, 17], 'rh', 'rk']]) {
       const { px, py } = largestBlob(seg, ids);
       cnt[leg] = px.length;
+      const fb = largestBlob(seg, leg === 'L' ? [22, 22] : [23, 23]);        // the shoe: its x extent gives the middle of the foot
+      if (fb.px.length >= 60) { const sx2 = SC.vw / acv.width, sy2 = SC.vh / acv.height; foot[leg] = { x0: Math.min(...fb.px) * sx2, x1: Math.max(...fb.px) * sx2, y1: Math.max(...fb.py) * sy2, n: fb.px.length }; }
       const top = new Map();                                  // highest labelled pixel in each column, in video pixels
       for (let q = 0; q < px.length; q++) if (!top.has(px[q]) || py[q] < top.get(px[q])) top.set(px[q], py[q]);
       sil[leg] = [...top].map(([x, y]) => ({ x: x * sx, y: y * sy })).sort((a, b) => a.x - b.x);
@@ -553,16 +555,63 @@ async function measureFrame(i) {                           // the frame is alrea
       }
     }
   }
-  f.measured = true; f.cnt = cnt; f.lines = lines; f.sil = sil;
+  f.measured = true; f.cnt = cnt; f.lines = lines; f.sil = sil; f.foot = foot;
 }
 
 /* ---------- barbell path: follow the end of the barbell through a rep (you tap it once, the app follows it) ---------- */
 const TW = 240, TR = 13, TS = 14, tc = document.createElement('canvas'), tctx = tc.getContext('2d', { willReadFrequently:true });
-function grayOf(src) {
-  const w = TW, h = Math.round(src.height * TW / src.width); tc.width = w; tc.height = h; tctx.drawImage(src, 0, 0, w, h);
+function grayOf(src, W) {
+  const w = W || TW, h = Math.round(src.height * w / src.width); tc.width = w; tc.height = h; tctx.drawImage(src, 0, 0, w, h);
   const d = tctx.getImageData(0, 0, w, h).data, g = new Float32Array(w * h);
   for (let p = 0; p < w * h; p++) g[p] = 0.299 * d[4*p] + 0.587 * d[4*p+1] + 0.114 * d[4*p+2];
   return { g, w, h };
+}
+function sobelOf(gr) {
+  const { g, w, h } = gr, gx = new Float32Array(w * h), gy = new Float32Array(w * h), m = new Float32Array(w * h);
+  for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
+    const i = y * w + x, a = g[i-w-1], b = g[i-w], c = g[i-w+1], d = g[i-1], f = g[i+1], e = g[i+w-1], q = g[i+w], r = g[i+w+1];
+    const sx = (c + 2*f + r) - (a + 2*d + e), sy = (e + 2*q + r) - (a + 2*b + c);
+    gx[i] = sx; gy[i] = sy; m[i] = Math.sqrt(sx*sx + sy*sy);
+  }
+  return { gx, gy, m };
+}
+function boxBlur(src, w, h, r) {                           // separable box blur, radius r
+  const tmp = new Float32Array(w * h), out = new Float32Array(w * h), n = 2 * r + 1;
+  for (let y = 0; y < h; y++) { let s0 = 0; for (let x = -r; x <= r; x++) s0 += src[y * w + clamp(x, 0, w - 1)];
+    for (let x = 0; x < w; x++) { tmp[y * w + x] = s0 / n; s0 += src[y * w + clamp(x + r + 1, 0, w - 1)] - src[y * w + clamp(x - r, 0, w - 1)]; } }
+  for (let x = 0; x < w; x++) { let s0 = 0; for (let y = -r; y <= r; y++) s0 += tmp[clamp(y, 0, h - 1) * w + x];
+    for (let y = 0; y < h; y++) { out[y * w + x] = s0 / n; s0 += tmp[clamp(y + r + 1, 0, h - 1) * w + x] - tmp[clamp(y - r, 0, h - 1) * w + x]; } }
+  return out;
+}
+// Auto-find the bar tip on the rep's lowest frame. The tip is a small round end cap; the rack's holes are just as round but
+// they sit still, so candidates are small circles (radial-symmetry votes) that also differ from the same spot ~half a second
+// earlier and later (i.e. they moved). Returns { x, y } in video pixels, or null.
+async function findBarTip(rep) {
+  const a = rep.low, others = [clamp(a - 14, rep.start, rep.end), clamp(a + 14, rep.start, rep.end)].filter((b, q, arr) => b !== a && arr.indexOf(b) === q);
+  if (!others.length) return null;
+  const G = new Map(); await forFrames([a, ...others], async i => { G.set(i, grayOf(acv, 320)); });
+  const A = G.get(a), { w, h } = A, { gx, gy, m } = sobelOf(A), hist = new Uint32Array(2048);
+  for (let i = 0; i < w * h; i++) hist[Math.min(2047, m[i] | 0)]++;
+  let acc = 0, thr = 40; for (let v = 0; v < 2048; v++) { acc += hist[v]; if (acc >= 0.9 * w * h) { thr = Math.max(40, v); break; } }
+  const votes = new Float32Array(w * h), rmin = 4, rmax = 13;
+  for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
+    const i = y * w + x; if (m[i] <= thr) continue; const ux = gx[i] / m[i], uy = gy[i] / m[i];
+    for (let r = rmin; r <= rmax; r++) for (let s = -1; s <= 1; s += 2) {
+      const cx = Math.round(x + s * r * ux), cy = Math.round(y + s * r * uy); if (cx >= 0 && cy >= 0 && cx < w && cy < h) votes[cy * w + cx]++;
+    }
+  }
+  const S = boxBlur(votes, w, h, 2), diff = new Float32Array(w * h);
+  for (let i = 0; i < w * h; i++) { let d = 1e9; for (const b of others) d = Math.min(d, Math.abs(A.g[i] - G.get(b).g[i])); diff[i] = d; }
+  const Mo = boxBlur(diff, w, h, 5), cand = [];
+  for (let y = 8; y < h - 8; y++) for (let x = 8; x < w - 8; x++) { const i = y * w + x; if (Mo[i] > 18 && S[i] > 3) cand.push({ x, y, S: S[i], Mo: Mo[i] }); }
+  cand.sort((p, q) => q.S - p.S);
+  const picked = []; for (const c of cand) { if (picked.every(p => Math.hypot(p.x - c.x, p.y - c.y) > 10)) picked.push(c); if (picked.length >= 6) break; }
+  SC.tipCandidates = picked.map(c => ({ x: Math.round(c.x * SC.vw / w), y: Math.round(c.y * SC.vh / h), S: +c.S.toFixed(1), Mo: Math.round(c.Mo) }));
+  const best = picked[0]; if (!best) return null;
+  // only trust a clear winner in the upper part of the frame (the feet are low down); otherwise let the user tap
+  const second = picked[1] ? picked[1].S : 0;
+  if (best.S < 1.5 * second || best.y > 0.7 * h) return null;
+  return { x: best.x * SC.vw / w, y: best.y * SC.vh / h };
 }
 // Where did the patch around p in frame a move to in frame b? Zero-mean SSD over a +-TS px search around the predicted spot.
 function trackStep(a, b, p, v) {
@@ -628,15 +677,26 @@ async function traceBar(k, start, anchor) {               // start: tapped point
   const [s0, e0] = descentWindow(smAll), sm = e0 - s0 >= 4 ? smAll.slice(s0, e0 + 1) : smAll;
   SC.barPath = { rep: k, pts: sm, ref: null, info: '' };
   // plumb line: straight up from the near-leg ankle (the planted foot) - how far does the bar wander from it?
-  const key = SC.nearLeg === 'R' ? 'ra' : 'la', as = [];
-  for (let i = rep.start; i <= rep.end; i++) { const f = SC.frames[i], a = f && f.kp && f.kp[key]; if (a && a.s >= 0.3) as.push(a); }
+  const key = SC.nearLeg === 'R' ? 'ra' : 'la', as = [], fx = [], fy = [];
+  for (let i = rep.start; i <= rep.end; i++) {
+    const f = SC.frames[i], a = f && f.kp && f.kp[key]; if (a && a.s >= 0.3) as.push(a);
+    const ft = f && f.foot && f.foot[SC.nearLeg]; if (ft) { fx.push((ft.x0 + ft.x1) / 2); fy.push(ft.y1); }
+  }
+  let refPt = null, refKind = '';
+  if (fx.length >= 2) { refPt = { x: median(fx), y: median(fy) }; refKind = 'the middle of the planted foot'; }
+  else if (as.length >= 3) {                                // no shoe outline: ankle, nudged toward the toes (the way the knees point)
+    const ax = median(as.map(a => a.x)), ay = median(as.map(a => a.y)), kk = rep.measured.map(i => SC.frames[i]).filter(f => f && f.kp && f.kp.lh && f.kp.lk);
+    const dir = kk.length ? Math.sign(median(kk.map(f => f.kp[SC.nearLeg === 'R' ? 'rk' : 'lk'].x - f.kp[SC.nearLeg === 'R' ? 'rh' : 'lh'].x))) || 1 : 1;
+    const kn = SC.frames[rep.low] && SC.frames[rep.low].kp && SC.frames[rep.low].kp[SC.nearLeg === 'R' ? 'rk' : 'lk'], shin = kn ? Math.hypot(kn.x - ax, kn.y - ay) : 0;
+    refPt = { x: ax + dir * 0.16 * shin, y: ay }; refKind = 'a little ahead of the planted ankle (about mid-foot)';
+  }
   const cover = `from frame ${sm[0].f + 1}, where the bar starts dropping straight down, to frame ${sm[sm.length - 1].f + 1}, where it stops rising straight up`;
-  if (as.length >= 3 && SC.bar) {
-    const ref = { x: median(as.map(a => a.x)), y: median(as.map(a => a.y)) }, { u } = axes();
+  if (refPt && SC.bar) {
+    const ref = refPt, { u } = axes();
     const d = sm.map(q => (q.x - ref.x) * u.x + (q.y - ref.y) * u.y), mn = Math.min(...d), mx = Math.max(...d), st = d[0];
     const side = v => Math.abs(v) < 1 ? 'on the line' : Math.abs(Math.round(v)) + ' px ' + (v > 0 ? 'right' : 'left') + ' of the line';
     SC.barPath.ref = ref;
-    SC.barPath.info = `Bar end, rep ${k + 1} (${cover}): starts ${side(st)}, ends ${side(d[d.length - 1])}; sideways travel ${(mx - mn).toFixed(0)} px (from ${side(mn)} to ${side(mx)}). The dashed line goes straight up from the planted ankle.`;
+    SC.barPath.info = `Bar end, rep ${k + 1} (${cover}): starts ${side(st)}, ends ${side(d[d.length - 1])}; sideways travel ${(mx - mn).toFixed(0)} px (from ${side(mn)} to ${side(mx)}). The dashed line goes straight up from ${refKind}.`;
   } else SC.barPath.info = `Bar end, rep ${k + 1} (${cover}): no foot reference was found, so only the path is drawn.`;
 }
 let traceMode = false;
@@ -768,6 +828,15 @@ async function finishAnalysis() {
   $('doneInfo').textContent = `Done in ${secs.toFixed(1)} s · ${SC.stats.pose} pose passes, ${SC.stats.seg} outline passes · near leg: ${SC.nearLeg === 'L' ? 'left' : 'right'}`;
   setStatus(`Done in ${secs.toFixed(1)} s. ${SC.reps.length} rep${SC.reps.length === 1 ? '' : 's'} found.`);
   showFrame(SC.reps[0].low); window.scrollTo(0, 0); setTimeout(() => window.scrollTo(0, 0), 300);
+  // then look for the bar end by itself and trace rep 1 (the results are already up)
+  try {
+    setStatus('Looking for the end of the bar…');
+    const tip = await findBarTip(SC.reps[0]);
+    if (tip) await traceBar(0, tip, SC.reps[0].low); else SC.barPath = null;
+  } catch (e) { console.warn('bar end trace failed', e); SC.barPath = null; }
+  setStatus(`Done in ${secs.toFixed(1)} s. ${SC.reps.length} rep${SC.reps.length === 1 ? '' : 's'} found.` + (SC.barPath ? ' Bar end traced for rep 1.' : " Couldn't find the bar end by itself: press Trace bar end (rep 1) and tap it."));
+  $('pathInfo').textContent = SC.barPath ? SC.barPath.info : ''; $('pathInfo').hidden = !SC.barPath;
+  showFrame(SC.view);
 }
 function setBusy(b) { for (const id of ['analyzeBtn', 'markBtn', 'pick', 'sampleBtn', 'recBtn']) $(id).disabled = b; }
 function resetResults() {
