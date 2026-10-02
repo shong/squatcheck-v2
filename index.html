@@ -518,12 +518,15 @@ function largestBlob(seg, ids) {
 }
 async function measureFrame(i) {                           // the frame is already on acv
   const sx = SC.vw / acv.width, sy = SC.vh / acv.height, f = SC.frames[i];
-  const cnt = { L:0, R:0 }, lines = { L:null, R:null };
+  const cnt = { L:0, R:0 }, lines = { L:null, R:null }, sil = { L:null, R:null };
   const seg = await bodyParts();
   if (seg) {
     for (const [leg, ids, hk, kk] of [['L', [14, 15], 'lh', 'lk'], ['R', [16, 17], 'rh', 'rk']]) {
       const { px, py } = largestBlob(seg, ids);
       cnt[leg] = px.length;
+      const top = new Map();                                  // highest labelled pixel in each column, in video pixels
+      for (let q = 0; q < px.length; q++) if (!top.has(px[q]) || py[q] < top.get(px[q])) top.set(px[q], py[q]);
+      sil[leg] = [...top].map(([x, y]) => ({ x: x * sx, y: y * sy })).sort((a, b) => a.x - b.x);
       const hip = f.kp[hk], knee = f.kp[kk];
       if (px.length >= 150 && hip && hip.s >= 0.3 && knee) {
         const ln = fitThigh(px, py, { x: hip.x / sx, y: hip.y / sy }, { x: knee.x / sx, y: knee.y / sy });
@@ -531,7 +534,7 @@ async function measureFrame(i) {                           // the frame is alrea
       }
     }
   }
-  f.measured = true; f.cnt = cnt; f.lines = lines;
+  f.measured = true; f.cnt = cnt; f.lines = lines; f.sil = sil;
 }
 
 /* ---------- analysis ---------- */
@@ -759,7 +762,13 @@ function drawOverlay(i) {
     if (a && b && jt != null) {
       const { u, n } = axes(), L = Math.hypot(a.x - b.x, a.y - b.y), th = (jt - JOINT_OFFSET) * Math.PI / 180, sg = Math.sign((a.x - b.x) * u.x + (a.y - b.y) * u.y) || 1;
       const d = { x: sg * Math.cos(th) * u.x + Math.sin(th) * n.x, y: sg * Math.cos(th) * u.y + Math.sin(th) * n.y };
-      const m = { x: (a.x + b.x) / 2 + 0.22 * L * n.x, y: (a.y + b.y) / 2 + 0.22 * L * n.y };
+      let m = { x: (a.x + b.x) / 2 + 0.22 * L * n.x, y: (a.y + b.y) / 2 + 0.22 * L * n.y };      // fallback: a guess at the thigh's thickness
+      const sl = f.sil && f.sil[SC.nearLeg];
+      if (sl && Math.abs(d.x) > 0.2) {                       // snap to the leg: rest the line on the thigh's top edge over the knee-side 45%
+        const x0 = b.x, x1 = b.x + 0.45 * (a.x - b.x), lo = Math.min(x0, x1), hi = Math.max(x0, x1), slope = d.y / d.x, xm = (a.x + b.x) / 2;
+        const ys = sl.filter(q => q.x >= lo && q.x <= hi).map(q => q.y - slope * (q.x - xm));
+        if (ys.length >= 5) m = { x: xm, y: median(ys) };
+      }
       octx.strokeStyle = '#ff4fd8'; octx.lineWidth = Math.max(3, 3 * k);
       octx.beginPath(); octx.moveTo(m.x - d.x * L / 2, m.y - d.y * L / 2); octx.lineTo(m.x + d.x * L / 2, m.y + d.y * L / 2); octx.stroke();
       if (useJoint) labelAt(fmtAngle(jt - JOINT_OFFSET), m.x - L / 2, m.y - 0.3 * L, k);
