@@ -103,7 +103,7 @@ input[type=range]{width:100%;accent-color:var(--accent)}
   <p id="barInfo" class="muted small" style="text-align:center"></p>
   <div class="row" style="justify-content:center">
     <button id="markBtn" type="button">Mark bar by hand</button>
-    <button id="analyzeBtn" class="primary" type="button" disabled>Analyze</button>
+    <button id="analyzeBtn" class="primary" type="button">Re-analyze</button>
   </div>
   <div id="tipsNoReps" class="tips small" hidden style="margin-top:12px">
     <strong>No reps found.</strong> Check that:
@@ -178,11 +178,14 @@ async function waitVisible() {
     document.addEventListener('visibilitychange', f);
   });
 }
+let rvfcMisses = 0;                                       // consecutive waits that only ended on the timer
 function framePainted() {
   return new Promise(res => {
-    let d = false; const f = () => { if (!d) { d = true; res(); } };
-    if ('requestVideoFrameCallback' in video) video.requestVideoFrameCallback(f);
-    setTimeout(f, 150);
+    let d = false;
+    const f = viaCallback => { if (d) return; d = true; rvfcMisses = viaCallback ? 0 : rvfcMisses + 1; res(); };
+    if ('requestVideoFrameCallback' in video) video.requestVideoFrameCallback(() => f(true));
+    // Where the callback never fires after a seek (it's the browsers that hand back stale frames that need it), stop paying 150 ms per frame
+    setTimeout(() => f(false), rvfcMisses >= 3 ? 25 : 150);
   });
 }
 async function seekTime(t) {
@@ -200,7 +203,8 @@ async function seekTime(t) {
 async function seekTo(i) { return seekTime((i + 0.5) / FPS); }
 function sizeAcv() {
   const k = AN_LONG / Math.max(SC.vw, SC.vh);
-  acv.width = Math.round(SC.vw * k); acv.height = Math.round(SC.vh * k);
+  const w = Math.round(SC.vw * k), h = Math.round(SC.vh * k);
+  if (acv.width !== w || acv.height !== h) { acv.width = w; acv.height = h; }
 }
 async function grabFrame(i) {
   await seekTo(i); sizeAcv();
@@ -226,7 +230,7 @@ async function onMeta(my) {
     }
     if (my !== loadSeq) return;
     applyMeta(video.videoWidth, video.videoHeight, video.duration);
-    await autoBar();
+    analyze();                                             // starts straight away; no tap needed
   } catch (e) { fail('Could not read the video: ' + e.message + ' Try another file.'); }
 }
 function applyMeta(w, h, dur) {
@@ -237,30 +241,11 @@ function applyMeta(w, h, dur) {
   ov.width = w; ov.height = h;
   const st = $('stage'); st.style.aspectRatio = w + ' / ' + h; st.style.width = 'min(100%, ' + (72 * w / h) + 'vh)';
   $('workArea').hidden = false; $('scrub').max = n - 1; $('scrub').value = 0;
-  $('analyzeBtn').disabled = true; drawOverlay(0);
+  $('analyzeBtn').disabled = false; drawOverlay(0);
 }
-async function autoBar() {
-  setStatus('Looking for the safety bar…', { pct:30 });
-  const my = loadSeq;
-  let bar = null;
-  try { bar = await detectBar(); } catch (e) { console.warn(e); }
-  if (my !== loadSeq) return;
-  if (bar) { setBar(bar.p1, bar.p2, true); setStatus('Safety bar found. Check the cyan line sits on the near safety bar, then tap Analyze.'); }
-  else { setStatus("Couldn't find the safety bar automatically. Tap Mark bar by hand, then tap both ends of the bar.", { error:true }); startMark(); }
-}
-
-/* ---------- safety bar detection ---------- */
-async function detectBar() {
-  const w = 320, h = Math.round(SC.vh * w / SC.vw), c = document.createElement('canvas');
-  c.width = w; c.height = h; const cx = c.getContext('2d', { willReadFrequently:true });
-  const n = clamp(Math.round(SC.dur * 3), 3, 15), grays = [];
-  for (let k = 0; k < n; k++) {
-    await seekTime((k + 0.5) / n * SC.dur);
-    cx.drawImage(video, 0, 0, w, h);
-    const d = cx.getImageData(0, 0, w, h).data, g = new Uint8Array(w * h);
-    for (let p = 0; p < w * h; p++) g[p] = (0.299 * d[4*p] + 0.587 * d[4*p+1] + 0.114 * d[4*p+2]) | 0;
-    grays.push(g);
-  }
+/* ---------- safety bar detection (from the quick-scan frames, no extra seeks) ---------- */
+function barFromGrays(grays, w, h) {
+  const n = grays.length; if (n < 3) return null;
   const med = new Uint8Array(w * h), tmp = new Uint8Array(n);
   for (let p = 0; p < w * h; p++) { for (let k = 0; k < n; k++) tmp[k] = grays[k][p]; tmp.sort(); med[p] = tmp[n >> 1]; }
   // Sobel
@@ -319,12 +304,13 @@ function setBar(p1, p2, auto) {
   SC.bar = { p1, p2 }; SC.barAuto = !!auto;
   $('barInfo').textContent = `Bar (${auto ? 'found automatically' : 'marked by hand'}): (${p1.x.toFixed(0)}, ${p1.y.toFixed(0)}) to (${p2.x.toFixed(0)}, ${p2.y.toFixed(0)}) in video pixels`;
   $('analyzeBtn').disabled = SC.busy;
+  if (SC.pending) { SC.pending = false; guarded(finishAnalysis); return; }
   if (SC.reps.length) { computeResults(); renderResults(); setStatus('Bar re-marked: results updated without re-analysis.'); }
   drawOverlay(SC.view);
 }
 /* ---------- manual bar marking (FR5) ---------- */
-function startMark() {
-  if (SC.busy) return;
+function startMark(force) {
+  if (SC.busy && !force) return;
   markPts = []; $('stage').classList.add('marking');
   $('barInfo').textContent = 'Tap the left end of the bar, then the right end.';
 }
@@ -339,7 +325,7 @@ ov.addEventListener('click', ev => {
   if (markPts.length === 2) {
     const [a, b] = markPts; markPts = null; $('stage').classList.remove('marking');
     if (Math.hypot(a.x - b.x, a.y - b.y) < 20) { fail('Those two taps are too close together. Tap Mark bar by hand and tap the two ends of the bar.'); return; }
-    setBar(a, b, false); setStatus('Bar marked. Tap Analyze.');
+    setBar(a, b, false);
   } else { octx.fillStyle = '#00a7c4'; octx.beginPath(); octx.arc(markPts[0].x, markPts[0].y, SC.vw / 80, 0, 7); octx.fill(); }
 });
 
@@ -367,17 +353,26 @@ function theta(line) {
 }
 
 /* ---------- models ---------- */
-async function loadModels() {
-  if (detector && segmenter) return;
-  if (!window.tf || !window.poseDetection || !window.bodySegmentation) throw new Error('The analysis libraries did not load. Check your connection and reload the page.');
-  setStatus('Loading models (first time only)…', { pct:5 });
-  try { await tf.setBackend('webgl'); await tf.ready(); } catch (e) { throw new Error('WebGL is required but not available in this browser.'); }
-  if (tf.getBackend() !== 'webgl') throw new Error('WebGL is required but not available in this browser.');
-  detector = await poseDetection.createDetector(poseDetection.SupportedModels.MoveNet, {
-    modelType: poseDetection.movenet.modelType.SINGLEPOSE_THUNDER, modelUrl: './model/model.json', enableSmoothing: false });
-  segmenter = await bodySegmentation.createSegmenter(bodySegmentation.SupportedModels.BodyPix, {
-    architecture: 'MobileNetV1', outputStride: 16, multiplier: 1.0, quantBytes: 2, modelUrl: './bodypix/model-stride16.json' });
+let modelsP = null, modelsReady = false;
+function loadModels(quiet) {
+  if (!modelsP) modelsP = (async () => {
+    if (!window.tf || !window.poseDetection || !window.bodySegmentation) throw new Error('The analysis libraries did not load. Check your connection and reload the page.');
+    if (!quiet) setStatus('Loading models (first time only)…', { pct:5 });
+    try { await tf.setBackend('webgl'); await tf.ready(); } catch (e) { throw new Error('WebGL is required but not available in this browser.'); }
+    if (tf.getBackend() !== 'webgl') throw new Error('WebGL is required but not available in this browser.');
+    detector = await poseDetection.createDetector(poseDetection.SupportedModels.MoveNet, {
+      modelType: poseDetection.movenet.modelType.SINGLEPOSE_THUNDER, modelUrl: './model/model.json', enableSmoothing: false });
+    segmenter = await bodySegmentation.createSegmenter(bodySegmentation.SupportedModels.BodyPix, {
+      architecture: 'MobileNetV1', outputStride: 16, multiplier: 1.0, quantBytes: 2, modelUrl: './bodypix/model-stride16.json' });
+    // one throw-away pass each so shader compilation doesn't land on the first real frame
+    const c = document.createElement('canvas'); c.width = 304; c.height = 540; c.getContext('2d').fillRect(0, 0, 304, 540);
+    await detector.estimatePoses(c); detector.reset();
+    const w = await segmenter.segmentPeople(c, SEG_OPTS); if (w[0]) (await w[0].mask.toTensor()).dispose();
+    modelsReady = true;
+  })().catch(e => { modelsP = null; throw e; });
+  return modelsP;
 }
+const SEG_OPTS = { multiSegmentation:false, segmentBodyParts:true, internalResolution:'high', segmentationThreshold:0.5 };
 const KP = { left_hip:'lh', right_hip:'rh', left_knee:'lk', right_knee:'rk' };
 async function poseFrame(i) {
   const poses = await detector.estimatePoses(acv, { flipHorizontal:false });
@@ -386,14 +381,57 @@ async function poseFrame(i) {
   if (poses[0]) for (const k of poses[0].keypoints) if (KP[k.name]) kp[KP[k.name]] = { x: k.x * sx, y: k.y * sy, s: k.score ?? 0 };
   SC.frames[i] = Object.assign(SC.frames[i] || {}, { kp });
 }
-async function ensurePose(i) {
-  if (SC.frames[i] && SC.frames[i].kp) return;
-  await grabFrame(i); await poseFrame(i);
+// Quick scan by playing the video: much cheaper than ~40 seeks. Frames are identified by mediaTime;
+// the model takes whichever frame is current whenever it is free (at least 3 frames after the last one).
+const SCAN_RATE = 1.5;
+async function playScan(onFrame) {
+  await waitVisible(); await seekTo(0);
+  const samples = []; let busy = false, last = -99, done = false;
+  return new Promise((resolve, reject) => {
+    let wd = null;
+    const finish = err => {
+      if (done) return; done = true; clearInterval(wd); video.pause(); video.playbackRate = 1;
+      document.removeEventListener('visibilitychange', vis); video.removeEventListener('ended', onEnd);
+      if (err) reject(err); else resolve(samples);
+    };
+    const vis = () => { if (done) return; if (document.visibilityState === 'hidden') { video.pause(); setStatus('Paused while this tab is in the background', { pct: 20 }); } else video.play().catch(() => {}); };
+    const onEnd = () => { const w = () => busy ? setTimeout(w, 20) : finish(); w(); };
+    const cb = (now, md) => {
+      if (done) return;
+      const i = Math.round(md.mediaTime * FPS);
+      if (!busy && i >= last + 3 && i < SC.N) {
+        sizeAcv(); actx.drawImage(video, 0, 0, acv.width, acv.height);
+        busy = true; last = i; samples.push(i);
+        onFrame(i, samples.length - 1).then(() => { busy = false; }, finish);
+      }
+      video.requestVideoFrameCallback(cb);
+    };
+    document.addEventListener('visibilitychange', vis); video.addEventListener('ended', onEnd);
+    let t = 0; wd = setInterval(() => { if (document.visibilityState === 'visible' && !samples.length && ++t >= 6) { const e = new Error('The video did not play for analysis.'); e.stall = true; finish(e); } }, 500);
+    video.playbackRate = SCAN_RATE; video.requestVideoFrameCallback(cb);
+    video.play().catch(e => finish(Object.assign(new Error('The browser would not play the video for analysis: ' + e.message), { stall: true })));
+  });
+}
+
+// Visit frames in order. Decoding (seeks) and inference compete for the GPU, so each runs alone:
+// grab a small batch of frames first, then run the model over the batch.
+async function forFrames(list, fn, cache) {
+  const B = 8;
+  for (let s = 0; s < list.length; s += B) {
+    const batch = list.slice(s, s + B), got = [];
+    for (const i of batch) {
+      await seekTo(i); sizeAcv();
+      const c = document.createElement('canvas'); c.width = acv.width; c.height = acv.height;
+      c.getContext('2d').drawImage(video, 0, 0, acv.width, acv.height);
+      got.push(c); if (cache) cache.set(i, c);
+    }
+    for (let q = 0; q < batch.length; q++) { actx.drawImage(got[q], 0, 0); await fn(batch[q], s + q); }
+  }
 }
 
 /* ---------- outline + thigh-top line ---------- */
 async function bodyParts() {
-  const segs = await segmenter.segmentPeople(acv, { multiSegmentation:false, segmentBodyParts:true, internalResolution:'high', segmentationThreshold:0.5 });
+  const segs = await segmenter.segmentPeople(acv, SEG_OPTS);
   SC.stats.seg++;
   if (!segs.length) return null;
   const t = await segs[0].mask.toTensor();           // int32 [h, w, 4]
@@ -439,8 +477,7 @@ function fitThigh(px, py, hip, knee) {
   const end = t => ({ x: cx + t * a.x + (f.c0 + f.c1 * t) * top.x, y: cy + t * a.y + (f.c0 + f.c1 * t) * top.y });
   return { k: end(tmin), h: end(tmax) };
 }
-async function measureFrame(i) {
-  await grabFrame(i);
+async function measureFrame(i) {                           // the frame is already on acv
   const sx = SC.vw / acv.width, sy = SC.vh / acv.height, f = SC.frames[i];
   const cnt = { L:0, R:0 }, lines = { L:null, R:null };
   const seg = await bodyParts();
@@ -473,56 +510,102 @@ function detectReps(samples) {
   if (cur) { cur.end = samples[samples.length - 1]; cur.open = true; reps.push(cur); }
   return reps.filter(r => (r.end - r.start) / FPS >= 0.2);
 }
-async function analyze() {
-  if (SC.busy || !SC.bar) return;
-  SC.busy = true; setBusy(true); const t0 = performance.now();
-  try {
-    resetResults();
-    await loadModels();
-    SC.frames = new Array(SC.N).fill(null); SC.stats = { pose:0, seg:0 };
-    detector.reset();
-    const samples = [];
-    for (let i = 0; i < SC.N; i += 3) samples.push(i);
-    for (let k = 0; k < samples.length; k++) {
-      setStatus(`Quick scan: frame ${samples[k] + 1} of ${SC.N}`, { pct: 5 + 40 * k / samples.length });
-      await ensurePose(samples[k]);
-    }
-    SC.reps = detectReps(samples);
-    if (!SC.reps.length) { $('tipsNoReps').hidden = false; setStatus('No reps found. See the filming tips below.', { error:true }); return; }
-    for (let r = 0; r < SC.reps.length; r++) {
-      const rep = SC.reps[r], base = 45 + 50 * r / SC.reps.length, span = 50 / SC.reps.length;
-      setStatus(`Rep ${r + 1} of ${SC.reps.length}: finding the lowest frame`, { pct: base });
-      let low0 = null, best = 1e18;
-      for (const i of samples) if (i >= rep.start && i <= rep.end) { const h = hipH(i); if (h != null && h < best) { best = h; low0 = i; } }
-      if (low0 == null) low0 = Math.round((rep.start + rep.end) / 2);
-      detector.reset();
-      const win = []; for (let j = low0 - 3; j <= low0 + 3; j++) if (j >= 0 && j < SC.N) win.push(j);
-      for (const j of win) { setStatus(`Rep ${r + 1}: pinning down the lowest frame (${j + 1})`, { pct: base + span * 0.3 }); await ensurePose(j); }
-      let low = null; best = 1e18;
-      // only frames whose whole ±2 window was analyzed compete, so the ends of the search window aren't favoured
-      for (const j of win) {
-        let full = true; for (let q = Math.max(0, j - 2); q <= Math.min(SC.N - 1, j + 2); q++) if (!SC.frames[q]) full = false;
-        const h = full ? avgH(j) : null; if (h != null && h < best) { best = h; low = j; }
-      }
-      if (low == null) low = low0;
-      rep.low = low; SC.frames[low].low = true;
-      const ms = []; for (let j = low - 2; j <= low + 2; j++) if (j >= 0 && j < SC.N) ms.push(j);
-      rep.measured = ms;
-      for (let q = 0; q < ms.length; q++) {
-        setStatus(`Rep ${r + 1}: measuring thigh angle (frame ${ms[q] + 1})`, { pct: base + span * (0.4 + 0.6 * q / ms.length) });
-        await ensurePose(ms[q]); await measureFrame(ms[q]);
-      }
-    }
-    computeResults(); renderResults();
-    const secs = (performance.now() - t0) / 1000;
-    $('doneInfo').textContent = `Done in ${secs.toFixed(1)} s · ${SC.stats.pose} pose passes, ${SC.stats.seg} outline passes · near leg: ${SC.nearLeg === 'L' ? 'left' : 'right'}`;
-    setStatus(`Done in ${secs.toFixed(1)} s. ${SC.reps.length} rep${SC.reps.length === 1 ? '' : 's'} found.`);
-    showFrame(SC.reps[0].low);
-  } catch (e) {
-    console.error(e); fail('Analysis stopped: ' + (e.message || e) + ' Reload the page and try again, or try a different video.');
-  } finally { SC.busy = false; setBusy(false); }
+async function guarded(fn) {
+  if (SC.busy) return;
+  SC.busy = true; setBusy(true);
+  try { await fn(); }
+  catch (e) { console.error(e); fail('Analysis stopped: ' + (e.message || e) + ' Reload the page and try again, or try a different video.'); }
+  finally { SC.busy = false; setBusy(false); }
 }
-function setBusy(b) { for (const id of ['analyzeBtn', 'markBtn', 'pick', 'sampleBtn', 'recBtn']) $(id).disabled = b || (id === 'analyzeBtn' && !SC.bar); }
+function analyze() { return guarded(scanPhase); }
+async function scanPhase() {
+  SC.t0 = performance.now(); SC.pending = false;
+  const keep = SC.bar && !SC.barAuto ? SC.bar : null;       // a hand-marked bar survives re-analysis
+  resetResults(); if (!keep) { SC.bar = null; $('barInfo').textContent = ''; }
+  if (!modelsReady) setStatus('Loading models (first time only)…', { pct:5 });
+  await loadModels();
+  SC.frames = new Array(SC.N).fill(null); SC.stats = { pose:0, seg:0 };
+  detector.reset();
+  const gw = 320, gh = Math.round(SC.vh * gw / SC.vw), gc = document.createElement('canvas'); gc.width = gw; gc.height = gh;
+  const gx = gc.getContext('2d', { willReadFrequently:true });
+  let grays = [], nextK = 0; const nb = clamp(Math.round(SC.dur * 3), 3, 15);
+  const onFrame = async i => {
+    setStatus(`Quick scan: ${((i + 0.5) / FPS).toFixed(1)} of ${SC.dur.toFixed(1)} s`, { pct: 8 + 37 * i / SC.N });
+    await poseFrame(i);
+    if (!keep && nextK < nb && (i + 0.5) / FPS >= (nextK + 0.5) / nb * SC.dur) {      // bar image: ~3 frames per second of video, 3-15 in all
+      nextK++; gx.drawImage(acv, 0, 0, gw, gh);
+      const d = gx.getImageData(0, 0, gw, gh).data, g = new Uint8Array(gw * gh);
+      for (let p = 0; p < gw * gh; p++) g[p] = (0.299 * d[4*p] + 0.587 * d[4*p+1] + 0.114 * d[4*p+2]) | 0;
+      grays.push(g);
+    }
+  };
+  let samples;
+  try {
+    if (!('requestVideoFrameCallback' in video) || window.__noPlayScan) throw Object.assign(new Error('no rVFC'), { stall: true });
+    samples = await playScan(onFrame);
+  } catch (e) {
+    if (!e.stall) throw e;
+    SC.frames = new Array(SC.N).fill(null); SC.stats = { pose:0, seg:0 }; grays = []; nextK = 0; detector.reset();
+    samples = []; for (let i = 0; i < SC.N; i += 3) samples.push(i);
+    await forFrames(samples, onFrame);
+  }
+  SC.samples = samples;
+  const keepGrays = grays;
+  if (!keep) {
+    setStatus('Looking for the safety bar…', { pct:45 });
+    const bar = barFromGrays(keepGrays, gw, gh);
+    if (!bar) {
+      SC.pending = true; startMark(true);
+      fail("Couldn't find the safety bar automatically. Tap both ends of the bar on the video to continue.");
+      return;
+    }
+    setBar(bar.p1, bar.p2, true);
+  }
+  await finishAnalysis();
+}
+async function finishAnalysis() {
+  const t0 = SC.t0, samples = SC.samples;
+  SC.reps = detectReps(samples);
+  if (!SC.reps.length) { $('tipsNoReps').hidden = false; setStatus('No reps found. See the filming tips below.', { error:true }); return; }
+  for (let r = 0; r < SC.reps.length; r++) {
+    const rep = SC.reps[r], base = 45 + 50 * r / SC.reps.length, span = 50 / SC.reps.length;
+    setStatus(`Rep ${r + 1} of ${SC.reps.length}: finding the lowest frame`, { pct: base });
+    let low0 = null, best = 1e18;
+    for (const i of samples) if (i >= rep.start && i <= rep.end) { const h = hipH(i); if (h != null && h < best) { best = h; low0 = i; } }
+    if (low0 == null) low0 = Math.round((rep.start + rep.end) / 2);
+    detector.reset();
+    const win = []; for (let j = low0 - 3; j <= low0 + 3; j++) if (j >= 0 && j < SC.N) win.push(j);
+    const cache = new Map();
+    await forFrames(win, async j => {
+      setStatus(`Rep ${r + 1}: pinning down the lowest frame (${j + 1})`, { pct: base + span * 0.3 });
+      if (!(SC.frames[j] && SC.frames[j].kp)) await poseFrame(j);
+    }, cache);
+    let low = null; best = 1e18;
+    // only frames whose whole ±2 window was analyzed compete, so the ends of the search window aren't favoured
+    for (const j of win) {
+      let full = true; for (let q = Math.max(0, j - 2); q <= Math.min(SC.N - 1, j + 2); q++) if (!SC.frames[q]) full = false;
+      const h = full ? avgH(j) : null; if (h != null && h < best) { best = h; low = j; }
+    }
+    if (low == null) low = low0;
+    if (!SC.frames[low]) { await grabFrame(low); await poseFrame(low); }
+    rep.low = low; SC.frames[low].low = true;
+    const ms = []; for (let j = low - 2; j <= low + 2; j++) if (j >= 0 && j < SC.N) ms.push(j);
+    rep.measured = ms;
+    for (let q = 0; q < ms.length; q++) {
+      const m = ms[q];
+      setStatus(`Rep ${r + 1}: measuring thigh angle (frame ${m + 1})`, { pct: base + span * (0.4 + 0.6 * q / ms.length) });
+      if (cache.has(m)) { sizeAcv(); actx.drawImage(cache.get(m), 0, 0); } else await grabFrame(m);
+      if (!(SC.frames[m] && SC.frames[m].kp)) await poseFrame(m);
+      await measureFrame(m);
+    }
+  }
+  computeResults(); renderResults();
+  const secs = (performance.now() - t0) / 1000;
+  $('doneInfo').textContent = `Done in ${secs.toFixed(1)} s · ${SC.stats.pose} pose passes, ${SC.stats.seg} outline passes · near leg: ${SC.nearLeg === 'L' ? 'left' : 'right'}`;
+  setStatus(`Done in ${secs.toFixed(1)} s. ${SC.reps.length} rep${SC.reps.length === 1 ? '' : 's'} found.`);
+  showFrame(SC.reps[0].low);
+}
+function setBusy(b) { for (const id of ['analyzeBtn', 'markBtn', 'pick', 'sampleBtn', 'recBtn']) $(id).disabled = b; }
 function resetResults() {
   SC.frames = []; SC.reps = []; SC.nearLeg = null; SC.view = 0;
   $('results').hidden = true; $('tipsNoReps').hidden = true;
@@ -655,6 +738,7 @@ drop.addEventListener('drop', e => { const f = e.dataTransfer.files[0]; if (f) f
 $('sampleBtn').onclick = () => loadVideo('./samples/one-squat.mp4', false);
 $('markBtn').onclick = startMark;
 $('analyzeBtn').onclick = analyze;
+loadModels(true).catch(() => {});                          // warm the models while the user picks a video
 
 let stream = null, mr = null, chunks = [], recTimer = null;
 if (window.self === window.top && navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.MediaRecorder) $('recBtn').hidden = false;
