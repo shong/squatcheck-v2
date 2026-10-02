@@ -57,6 +57,7 @@ table{border-collapse:collapse;width:100%;font-size:.9rem}
 th,td{text-align:left;border-bottom:1px solid var(--line);padding:5px 8px}
 input[type=range]{width:100%;accent-color:var(--accent)}
 #caption{min-height:2.7em;margin:8px 0}
+.toggles{margin:8px 0 0;gap:18px}.toggles label{display:flex;align-items:center;gap:6px;cursor:pointer;font-weight:600;padding:4px 0}.toggles input{width:18px;height:18px;accent-color:var(--accent)}
 .sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
 details>summary{cursor:pointer}
 #headline{font:700 2rem/1.2 "Space Grotesk",sans-serif;margin:0 0 10px}
@@ -118,6 +119,7 @@ details>summary{cursor:pointer}
 <section class="card" aria-label="Video">
   <div id="stage"><div id="zoomLayer"><video id="video" muted playsinline preload="auto"></video><canvas id="ov"></canvas></div></div>
   <div id="viewerCtl" hidden>
+    <div class="row toggles"><label><input type="checkbox" id="showDepth" checked> Depth line</label><label><input type="checkbox" id="showPath" checked> Bar path</label></div>
     <input id="scrub" type="range" min="0" max="0" value="0" aria-label="Frame" style="margin-top:8px">
     <div class="row" style="margin-top:4px">
       <button id="prevF" type="button">◀ Prev</button><button id="nextF" type="button">Next ▶</button>
@@ -837,10 +839,10 @@ function labelAt(txt, x, y, k) {
 function drawOverlay(i) {
   octx.clearRect(0, 0, ov.width, ov.height);
   if (!SC.bar) return;
-  const k = SC.vw / 360;
+  const k = SC.vw / 360, showPath = $('showPath').checked, showDepth = $('showDepth').checked;
   octx.lineCap = 'round'; octx.lineWidth = Math.max(2, 2 * k);
   if (!SC.assumedLevel) { octx.strokeStyle = '#00d0f0'; octx.beginPath(); octx.moveTo(SC.bar.p1.x, SC.bar.p1.y); octx.lineTo(SC.bar.p2.x, SC.bar.p2.y); octx.stroke(); }   // nothing to draw when level is assumed
-  if (SC.barPath && !drawPts) {                            // barbell-end path for rep 1 (yellow), with the plate outline at this frame
+  if (SC.barPath && !drawPts && showPath) {                // barbell-end path for rep 1 (yellow), with the plate outline at this frame
     const P = SC.barPath.pts; octx.lineJoin = 'round';
     if (SC.barPath.ref) {
       const { n } = axes(), r0 = SC.barPath.ref, top = Math.min(...P.map(q => q.y)) - 40 * k, tUp = Math.max(60, (r0.y - top) / Math.max(0.3, Math.abs(n.y))), tDn = 25 * k;
@@ -858,12 +860,12 @@ function drawOverlay(i) {
   }
   const rr = SC.reps.find(r => r.measured && r.measured.includes(i)), useJoint = !!rr && rr.method === 'joint';
   const mn = SC.manual && SC.manual[i];
-  if (mn) {
+  if (mn && showDepth) {
     octx.strokeStyle = '#7CFC00'; octx.lineWidth = Math.max(3, 3 * k); octx.setLineDash([10 * k, 6 * k]);
     octx.beginPath(); octx.moveTo(mn.k.x, mn.k.y); octx.lineTo(mn.h.x, mn.h.y); octx.stroke(); octx.setLineDash([]);
   }
   const f = SC.frames[i], ln = f && f.lines && SC.nearLeg && f.lines[SC.nearLeg];
-  if (!drawPts && f && f.kp) {                             // thigh-top line estimated from the joints (joint line minus the offset)
+  if (!drawPts && showDepth && f && f.kp) {                // thigh-top line estimated from the joints (joint line minus the offset)
     const kk = f.kp, a = kk[SC.nearLeg === 'R' ? 'rh' : 'lh'], b = kk[SC.nearLeg === 'R' ? 'rk' : 'lk'], jt = jointTheta(i);
     if (a && b && jt != null) {
       const { u, n } = axes(), L = Math.hypot(a.x - b.x, a.y - b.y), th = (jt - JOINT_OFFSET) * Math.PI / 180, sg = Math.sign((a.x - b.x) * u.x + (a.y - b.y) * u.y) || 1;
@@ -880,7 +882,7 @@ function drawOverlay(i) {
       if (useJoint) labelAt(fmtAngle(jt - JOINT_OFFSET), m.x - L / 2, m.y - 0.3 * L, k);
     }
   }
-  if (ln && !drawPts) {                                    // hidden while drawing so it doesn't cover the thigh
+  if (ln && !drawPts && showDepth) {                       // hidden while drawing so it doesn't cover the thigh
     octx.strokeStyle = '#ffa31a'; octx.lineWidth = Math.max(useJoint ? 2 : 3, (useJoint ? 2 : 3) * k);
     if (useJoint) octx.setLineDash([8 * k, 6 * k]);
     octx.beginPath(); octx.moveTo(ln.k.x, ln.k.y); octx.lineTo(ln.h.x, ln.h.y); octx.stroke(); octx.setLineDash([]);
@@ -904,9 +906,10 @@ async function showFrame(i) {
   else if (!SC.reps.length) why = 'Not analyzed yet.';
   else why = 'Not measured: only the lowest frame of each rep and 2 either side are measured.';
   const jt = jointTheta(i), hand = SC.manual && SC.manual[i];
-  $('caption').textContent = `Frame ${i + 1} of ${SC.N} · ${fmtT(i)}. ${why}` + (jt != null ? ` Joint line (hip to knee): ${fmtAngle(jt)}; estimate from joints (pink line): ${fmtAngle(jt - JOINT_OFFSET)}.` : '') + (hand ? ` Hand-drawn: ${fmtAngle(theta(hand))}.` : '') + (SC.barPath ? ' Yellow: path of the barbell end, rep ' + (SC.barPath.rep + 1) + '.' : '');
+  $('caption').textContent = `Frame ${i + 1} of ${SC.N} · ${fmtT(i)}. ${why}` + (jt != null ? ` Joint line (hip to knee): ${fmtAngle(jt)}; estimate from joints${$('showDepth').checked ? ' (pink line)' : ''}: ${fmtAngle(jt - JOINT_OFFSET)}.` : '') + (hand ? ` Hand-drawn: ${fmtAngle(theta(hand))}.` : '') + (SC.barPath && $('showPath').checked ? ' Yellow: path of the barbell end, rep ' + (SC.barPath.rep + 1) + '.' : '');
 }
 $('scrub').addEventListener('input', e => showFrame(+e.target.value));
+$('showDepth').onchange = $('showPath').onchange = () => showFrame(SC.view);
 // Zoom the stage onto the near leg (hip and knee plus a margin) so the thigh is easier to trace.
 function zoomToLeg() {
   const f = SC.frames[SC.view], k = f && f.kp, a = SC.nearLeg === 'R' ? 'rh' : 'lh', b = SC.nearLeg === 'R' ? 'rk' : 'lk';
