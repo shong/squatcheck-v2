@@ -358,6 +358,9 @@ function avgH(i) {
   for (let j = i - 2; j <= i + 2; j++) { if (j < 0 || j >= SC.N) continue; const h = hipH(j); if (h != null) { s += h; c++; } }
   return c ? s / c : null;
 }
+// The pose model's hip-to-knee line is steady but reads ~5 deg steeper than the thigh's top surface. It is the fallback
+// when the outline fit disagrees with it by more than DISAGREE degrees (outline fits go wrong when the torso overlaps a dark thigh).
+const JOINT_OFFSET = 5, DISAGREE = 4;
 function jointTheta(i) {                                   // pose-model hip to knee, near leg; for comparison only
   const f = SC.frames[i], k = f && f.kp, a = SC.nearLeg === 'R' ? 'rh' : 'lh', b = SC.nearLeg === 'R' ? 'rk' : 'lk';
   if (!k || !k[a] || !k[b] || k[a].s < 0.3 || !SC.bar) return null;
@@ -658,10 +661,14 @@ function computeResults() {
     const used = rep.thetas.filter(t => t.th != null && Math.abs(t.th) <= 30);
     used.forEach(t => t.used = true);
     rep.depth = used.length ? median(used.map(t => t.th)) : null;
+    rep.outline = rep.depth;
+    const jv = rep.measured.map(jointTheta).filter(v => v != null), jest = jv.length ? median(jv) - JOINT_OFFSET : null;
+    rep.joint = jest; rep.method = 'outline';
+    if (jest != null && (rep.outline == null || Math.abs(rep.outline - jest) > DISAGREE)) { rep.depth = jest; rep.method = 'joint'; }
     rep.auto = rep.depth;
     const hand = [rep.low, ...rep.measured].filter(i => SC.manual[i]).map(i => theta(SC.manual[i]));
     rep.hand = hand.length ? median(hand) : null;
-    if (rep.hand != null) rep.depth = rep.hand;               // a hand-drawn line overrides the automatic reading
+    if (rep.hand != null) { rep.depth = rep.hand; rep.method = 'hand'; }               // a hand-drawn line overrides the automatic reading
   }
 }
 
@@ -676,8 +683,8 @@ function renderResults() {
   $('repList').innerHTML = SC.reps.map((r, k) => {
     const ok = r.depth != null, b = !ok ? ['na', 'Not measured'] : r.depth <= 0 ? ['below', 'Below parallel'] : ['above', 'Above parallel'];
     const used = r.thetas.filter(t => t.used).map(t => t.f + 1);
-    return `<div class="rep"><div><strong>Rep ${k + 1}</strong> <span class="badge ${b[0]}">${b[1]}</span></div><div>${ok ? fmtAngle(r.depth) + (r.hand != null ? ' (hand-drawn' + (r.auto != null ? '; auto ' + fmtAngle(r.auto) : '') + ')' : '') : 'No thigh outline found'}</div><button type="button" data-view="${r.low}">View</button>
-      <div class="meta">${((r.start + 0.5) / FPS).toFixed(2)}–${((r.end + 0.5) / FPS).toFixed(2)} s · lowest at frame ${r.low + 1} (${fmtT(r.low)}) · frames used: ${used.length ? used[0] + '–' + used[used.length - 1] + ' (' + used.length + ')' : 'none'}${r.open ? ' · ⚠ cut off by the end of the video' : ''}</div></div>`;
+    return `<div class="rep"><div><strong>Rep ${k + 1}</strong> <span class="badge ${b[0]}">${b[1]}</span></div><div>${ok ? fmtAngle(r.depth) + (r.hand != null ? ' (hand-drawn; auto ' + fmtAngle(r.auto) + ')' : '') : 'No thigh outline found'}</div><button type="button" data-view="${r.low}">View</button>
+      <div class="meta">${((r.start + 0.5) / FPS).toFixed(2)}–${((r.end + 0.5) / FPS).toFixed(2)} s · lowest at frame ${r.low + 1} (${fmtT(r.low)}) · frames used: ${used.length ? used[0] + '–' + used[used.length - 1] + ' (' + used.length + ')' : 'none'}${r.open ? ' · ⚠ cut off by the end of the video' : ''}<br>Depth from: ${r.method === 'hand' ? 'your hand-drawn line' : r.method === 'joint' ? 'joint line −' + JOINT_OFFSET + '° (the outline fit read ' + fmtAngle(r.outline) + ' and disagreed with the joints, so it was not used)' : 'thigh outline fit' + (r.joint != null ? ' (agrees with joint line to ' + Math.abs(r.outline - r.joint).toFixed(1) + '°)' : '')}</div></div>`;
   }).join('');
   $('repList').querySelectorAll('[data-view]').forEach(b => b.onclick = () => { showFrame(+b.dataset.view); $('stage').scrollIntoView({ block:'center', behavior:'smooth' }); });
   renderChart(); renderTable(); $('scrub').max = SC.N - 1;
@@ -730,24 +737,39 @@ $('copyCsv').onclick = async () => {
 };
 
 /* ---------- frame viewer (FR13) ---------- */
+function labelAt(txt, x, y, k) {
+  octx.font = `700 ${Math.round(16 * k)}px Inter,sans-serif`; octx.fillStyle = '#fff'; octx.strokeStyle = '#000'; octx.lineWidth = 2 * k;
+  octx.strokeText(txt, x, y); octx.fillText(txt, x, y);
+}
 function drawOverlay(i) {
   octx.clearRect(0, 0, ov.width, ov.height);
   if (!SC.bar) return;
   const k = SC.vw / 360;
   octx.lineCap = 'round'; octx.lineWidth = Math.max(2, 2 * k);
   octx.strokeStyle = '#00d0f0'; octx.beginPath(); octx.moveTo(SC.bar.p1.x, SC.bar.p1.y); octx.lineTo(SC.bar.p2.x, SC.bar.p2.y); octx.stroke();
+  const rr = SC.reps.find(r => r.measured && r.measured.includes(i)), useJoint = !!rr && rr.method === 'joint';
   const mn = SC.manual && SC.manual[i];
   if (mn) {
     octx.strokeStyle = '#7CFC00'; octx.lineWidth = Math.max(3, 3 * k); octx.setLineDash([10 * k, 6 * k]);
     octx.beginPath(); octx.moveTo(mn.k.x, mn.k.y); octx.lineTo(mn.h.x, mn.h.y); octx.stroke(); octx.setLineDash([]);
   }
   const f = SC.frames[i], ln = f && f.lines && SC.nearLeg && f.lines[SC.nearLeg];
+  if (!drawPts && f && f.kp) {                             // thigh-top line estimated from the joints (joint line minus the offset)
+    const kk = f.kp, a = kk[SC.nearLeg === 'R' ? 'rh' : 'lh'], b = kk[SC.nearLeg === 'R' ? 'rk' : 'lk'], jt = jointTheta(i);
+    if (a && b && jt != null) {
+      const { u, n } = axes(), L = Math.hypot(a.x - b.x, a.y - b.y), th = (jt - JOINT_OFFSET) * Math.PI / 180, sg = Math.sign((a.x - b.x) * u.x + (a.y - b.y) * u.y) || 1;
+      const d = { x: sg * Math.cos(th) * u.x + Math.sin(th) * n.x, y: sg * Math.cos(th) * u.y + Math.sin(th) * n.y };
+      const m = { x: (a.x + b.x) / 2 + 0.22 * L * n.x, y: (a.y + b.y) / 2 + 0.22 * L * n.y };
+      octx.strokeStyle = '#ff4fd8'; octx.lineWidth = Math.max(3, 3 * k);
+      octx.beginPath(); octx.moveTo(m.x - d.x * L / 2, m.y - d.y * L / 2); octx.lineTo(m.x + d.x * L / 2, m.y + d.y * L / 2); octx.stroke();
+      if (useJoint) labelAt(fmtAngle(jt - JOINT_OFFSET), m.x - L / 2, m.y - 0.3 * L, k);
+    }
+  }
   if (ln && !drawPts) {                                    // hidden while drawing so it doesn't cover the thigh
-    octx.strokeStyle = '#ffa31a'; octx.lineWidth = Math.max(3, 3 * k);
-    octx.beginPath(); octx.moveTo(ln.k.x, ln.k.y); octx.lineTo(ln.h.x, ln.h.y); octx.stroke();
-    octx.font = `700 ${Math.round(16 * k)}px Inter,sans-serif`; octx.fillStyle = '#fff'; octx.strokeStyle = '#000'; octx.lineWidth = 4 * k / 2;
-    const txt = fmtAngle(theta(ln)), x = Math.min(ln.k.x, ln.h.x), y = Math.min(ln.k.y, ln.h.y) - 10 * k;
-    octx.strokeText(txt, x, y); octx.fillText(txt, x, y);
+    octx.strokeStyle = '#ffa31a'; octx.lineWidth = Math.max(useJoint ? 2 : 3, (useJoint ? 2 : 3) * k);
+    if (useJoint) octx.setLineDash([8 * k, 6 * k]);
+    octx.beginPath(); octx.moveTo(ln.k.x, ln.k.y); octx.lineTo(ln.h.x, ln.h.y); octx.stroke(); octx.setLineDash([]);
+    if (!useJoint) labelAt(fmtAngle(theta(ln)), Math.min(ln.k.x, ln.h.x), Math.min(ln.k.y, ln.h.y) - 10 * k, k);
   }
 }
 async function showFrame(i) {
@@ -767,7 +789,7 @@ async function showFrame(i) {
   else if (!SC.reps.length) why = 'Not analyzed yet.';
   else why = 'Not measured: only the lowest frame of each rep and 2 either side are measured.';
   const jt = jointTheta(i), hand = SC.manual && SC.manual[i];
-  $('caption').textContent = `Frame ${i + 1} of ${SC.N} · ${fmtT(i)}. ${why}` + (jt != null ? ` Joint line (hip to knee): ${fmtAngle(jt)}.` : '') + (hand ? ` Hand-drawn: ${fmtAngle(theta(hand))}.` : '');
+  $('caption').textContent = `Frame ${i + 1} of ${SC.N} · ${fmtT(i)}. ${why}` + (jt != null ? ` Joint line (hip to knee): ${fmtAngle(jt)}; estimate from joints (pink line): ${fmtAngle(jt - JOINT_OFFSET)}.` : '') + (hand ? ` Hand-drawn: ${fmtAngle(theta(hand))}.` : '');
 }
 $('scrub').addEventListener('input', e => showFrame(+e.target.value));
 // Zoom the stage onto the near leg (hip and knee plus a margin) so the thigh is easier to trace.
