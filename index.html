@@ -39,6 +39,7 @@ progress{width:100%;height:8px;accent-color:var(--accent)}
 #stage{position:relative;margin:0 auto;background:#000;border-radius:10px;overflow:hidden;max-height:72vh}
 #stage video,#stage canvas{position:absolute;inset:0;width:100%;height:100%;object-fit:contain}
 #stage.marking canvas{cursor:crosshair}
+#zoomLayer{position:absolute;inset:0;transform-origin:0 0;transition:transform .25s ease}
 #rec{width:100%;max-height:60vh;background:#000;border-radius:10px}
 .tips{background:color-mix(in srgb,var(--accent) 8%,transparent);border-radius:10px;padding:10px 14px}
 .tips ul{margin:.3em 0 0;padding-left:1.2em}
@@ -99,7 +100,7 @@ input[type=range]{width:100%;accent-color:var(--accent)}
 <div id="workArea" hidden>
 <section class="card" aria-labelledby="barH">
   <h2 id="barH">2 · Safety bar and analysis</h2>
-  <div id="stage"><video id="video" muted playsinline preload="auto"></video><canvas id="ov"></canvas></div>
+  <div id="stage"><div id="zoomLayer"><video id="video" muted playsinline preload="auto"></video><canvas id="ov"></canvas></div></div>
   <p id="barInfo" class="muted small" style="text-align:center"></p>
   <div class="row" style="justify-content:center">
     <button id="markBtn" type="button">Mark bar by hand</button>
@@ -132,7 +133,9 @@ input[type=range]{width:100%;accent-color:var(--accent)}
   <input id="scrub" type="range" min="0" max="0" value="0" aria-label="Frame">
   <div class="row" style="margin-top:6px">
     <button id="prevF" type="button">◀ Prev</button><button id="nextF" type="button">Next ▶</button>
+    <button id="drawBtn" type="button">Draw thigh line</button><button id="clearDraw" type="button">Clear drawn line</button>
   </div>
+  <p id="drawHint" class="muted small" hidden></p>
   <div id="caption" aria-live="polite"></div>
 </section>
 <section class="card" aria-labelledby="exH">
@@ -150,12 +153,12 @@ input[type=range]{width:100%;accent-color:var(--accent)}
 <script>
 'use strict';
 const FPS = 30, AN_LONG = 540;
-const SC = window.SC = { vw:0, vh:0, dur:0, N:0, bar:null, barAuto:false, frames:[], reps:[], nearLeg:null, busy:false, stats:{pose:0,seg:0}, view:0 };
+const SC = window.SC = { manual:{}, vw:0, vh:0, dur:0, N:0, bar:null, barAuto:false, frames:[], reps:[], nearLeg:null, busy:false, stats:{pose:0,seg:0}, view:0 };
 const $ = id => document.getElementById(id);
 const video = $('video'), ov = $('ov'), octx = ov.getContext('2d');
 const acv = document.createElement('canvas'), actx = acv.getContext('2d', { willReadFrequently:true });
 window.acv = acv;
-let detector = null, segmenter = null, objectUrl = null, markPts = null, viewSeq = 0, loadSeq = 0;
+let drawPts = null, detector = null, segmenter = null, objectUrl = null, markPts = null, viewSeq = 0, loadSeq = 0;
 const clamp = (v,a,b) => Math.max(a, Math.min(b, v));
 const median = a => { const s = a.slice().sort((x,y)=>x-y), m = s.length>>1; return s.length%2 ? s[m] : (s[m-1]+s[m])/2; };
 
@@ -320,6 +323,14 @@ function ovPoint(ev) {
   return { x: clamp((ev.clientX - ox) / s, 0, SC.vw), y: clamp((ev.clientY - oy) / s, 0, SC.vh) };
 }
 ov.addEventListener('click', ev => {
+  if (drawPts) {
+    drawPts.push(ovPoint(ev));
+    if (drawPts.length === 2) {
+      const [k, h] = drawPts; drawPts = null; $('stage').classList.remove('marking'); $('drawHint').hidden = true; unzoom();
+      SC.manual[SC.view] = { k, h }; computeResults(); renderResults(); showFrame(SC.view);
+    } else $('drawHint').textContent = 'Now tap the hip end: the top of the thigh where it meets the hip crease.';
+    return;
+  }
   if (!markPts) return;
   markPts.push(ovPoint(ev));
   if (markPts.length === 2) {
@@ -346,6 +357,11 @@ function avgH(i) {
   let s = 0, c = 0;
   for (let j = i - 2; j <= i + 2; j++) { if (j < 0 || j >= SC.N) continue; const h = hipH(j); if (h != null) { s += h; c++; } }
   return c ? s / c : null;
+}
+function jointTheta(i) {                                   // pose-model hip to knee, near leg; for comparison only
+  const f = SC.frames[i], k = f && f.kp, a = SC.nearLeg === 'R' ? 'rh' : 'lh', b = SC.nearLeg === 'R' ? 'rk' : 'lk';
+  if (!k || !k[a] || !k[b] || k[a].s < 0.3 || !SC.bar) return null;
+  return theta({ k: k[b], h: k[a] });
 }
 function theta(line) {
   const { u, n } = axes(), d = { x: line.h.x - line.k.x, y: line.h.y - line.k.y };
@@ -562,6 +578,10 @@ async function scanPhase() {
   try {
     if (!('requestVideoFrameCallback' in video) || window.__noPlayScan) throw Object.assign(new Error('no rVFC'), { stall: true });
     samples = await playScan(onFrame);
+    // Browsers can throttle frame callbacks (background or low-power pages), leaving big holes in the scan: fill them by seeking.
+    const add = [], pts = [-3, ...samples, SC.N + 2];
+    for (let q = 1; q < pts.length; q++) if (pts[q] - pts[q - 1] > 6) for (let i = pts[q - 1] + 3; i <= pts[q] - 3 && i < SC.N; i += 3) add.push(i);
+    if (add.length) { detector.reset(); await forFrames(add, onFrame); samples = samples.concat(add).sort((a, b) => a - b); }
   } catch (e) {
     if (!e.stall) throw e;
     SC.frames = new Array(SC.N).fill(null); SC.stats = { pose:0, seg:0 }; grays = []; nextK = 0; detector.reset();
@@ -626,7 +646,7 @@ async function finishAnalysis() {
 }
 function setBusy(b) { for (const id of ['analyzeBtn', 'markBtn', 'pick', 'sampleBtn', 'recBtn']) $(id).disabled = b; }
 function resetResults() {
-  SC.frames = []; SC.reps = []; SC.nearLeg = null; SC.view = 0;
+  SC.frames = []; SC.reps = []; SC.nearLeg = null; SC.view = 0; SC.manual = {}; drawPts = null;
   $('results').hidden = true; $('tipsNoReps').hidden = true;
 }
 function computeResults() {
@@ -638,6 +658,10 @@ function computeResults() {
     const used = rep.thetas.filter(t => t.th != null && Math.abs(t.th) <= 30);
     used.forEach(t => t.used = true);
     rep.depth = used.length ? median(used.map(t => t.th)) : null;
+    rep.auto = rep.depth;
+    const hand = [rep.low, ...rep.measured].filter(i => SC.manual[i]).map(i => theta(SC.manual[i]));
+    rep.hand = hand.length ? median(hand) : null;
+    if (rep.hand != null) rep.depth = rep.hand;               // a hand-drawn line overrides the automatic reading
   }
 }
 
@@ -652,7 +676,7 @@ function renderResults() {
   $('repList').innerHTML = SC.reps.map((r, k) => {
     const ok = r.depth != null, b = !ok ? ['na', 'Not measured'] : r.depth <= 0 ? ['below', 'Below parallel'] : ['above', 'Above parallel'];
     const used = r.thetas.filter(t => t.used).map(t => t.f + 1);
-    return `<div class="rep"><div><strong>Rep ${k + 1}</strong> <span class="badge ${b[0]}">${b[1]}</span></div><div>${ok ? fmtAngle(r.depth) : 'No thigh outline found'}</div><button type="button" data-view="${r.low}">View</button>
+    return `<div class="rep"><div><strong>Rep ${k + 1}</strong> <span class="badge ${b[0]}">${b[1]}</span></div><div>${ok ? fmtAngle(r.depth) + (r.hand != null ? ' (hand-drawn' + (r.auto != null ? '; auto ' + fmtAngle(r.auto) : '') + ')' : '') : 'No thigh outline found'}</div><button type="button" data-view="${r.low}">View</button>
       <div class="meta">${((r.start + 0.5) / FPS).toFixed(2)}–${((r.end + 0.5) / FPS).toFixed(2)} s · lowest at frame ${r.low + 1} (${fmtT(r.low)}) · frames used: ${used.length ? used[0] + '–' + used[used.length - 1] + ' (' + used.length + ')' : 'none'}${r.open ? ' · ⚠ cut off by the end of the video' : ''}</div></div>`;
   }).join('');
   $('repList').querySelectorAll('[data-view]').forEach(b => b.onclick = () => { showFrame(+b.dataset.view); $('stage').scrollIntoView({ block:'center', behavior:'smooth' }); });
@@ -712,8 +736,13 @@ function drawOverlay(i) {
   const k = SC.vw / 360;
   octx.lineCap = 'round'; octx.lineWidth = Math.max(2, 2 * k);
   octx.strokeStyle = '#00d0f0'; octx.beginPath(); octx.moveTo(SC.bar.p1.x, SC.bar.p1.y); octx.lineTo(SC.bar.p2.x, SC.bar.p2.y); octx.stroke();
+  const mn = SC.manual && SC.manual[i];
+  if (mn) {
+    octx.strokeStyle = '#7CFC00'; octx.lineWidth = Math.max(3, 3 * k); octx.setLineDash([10 * k, 6 * k]);
+    octx.beginPath(); octx.moveTo(mn.k.x, mn.k.y); octx.lineTo(mn.h.x, mn.h.y); octx.stroke(); octx.setLineDash([]);
+  }
   const f = SC.frames[i], ln = f && f.lines && SC.nearLeg && f.lines[SC.nearLeg];
-  if (ln) {
+  if (ln && !drawPts) {                                    // hidden while drawing so it doesn't cover the thigh
     octx.strokeStyle = '#ffa31a'; octx.lineWidth = Math.max(3, 3 * k);
     octx.beginPath(); octx.moveTo(ln.k.x, ln.k.y); octx.lineTo(ln.h.x, ln.h.y); octx.stroke();
     octx.font = `700 ${Math.round(16 * k)}px Inter,sans-serif`; octx.fillStyle = '#fff'; octx.strokeStyle = '#000'; octx.lineWidth = 4 * k / 2;
@@ -737,9 +766,30 @@ async function showFrame(i) {
   else if (f && f.measured) why = 'Measured, but no thigh outline was found on this frame.';
   else if (!SC.reps.length) why = 'Not analyzed yet.';
   else why = 'Not measured: only the lowest frame of each rep and 2 either side are measured.';
-  $('caption').textContent = `Frame ${i + 1} of ${SC.N} · ${fmtT(i)}. ${why}`;
+  const jt = jointTheta(i), hand = SC.manual && SC.manual[i];
+  $('caption').textContent = `Frame ${i + 1} of ${SC.N} · ${fmtT(i)}. ${why}` + (jt != null ? ` Joint line (hip to knee): ${fmtAngle(jt)}.` : '') + (hand ? ` Hand-drawn: ${fmtAngle(theta(hand))}.` : '');
 }
 $('scrub').addEventListener('input', e => showFrame(+e.target.value));
+// Zoom the stage onto the near leg (hip and knee plus a margin) so the thigh is easier to trace.
+function zoomToLeg() {
+  const f = SC.frames[SC.view], k = f && f.kp, a = SC.nearLeg === 'R' ? 'rh' : 'lh', b = SC.nearLeg === 'R' ? 'rk' : 'lk';
+  if (!k || !k[a] || !k[b]) return;
+  const st = $('stage'), sw = st.clientWidth, sh = st.clientHeight, s0 = Math.min(sw / SC.vw, sh / SC.vh);
+  const ox = (sw - SC.vw * s0) / 2, oy = (sh - SC.vh * s0) / 2, L = Math.hypot(k[a].x - k[b].x, k[a].y - k[b].y), mx = 0.2 * L, my = 0.45 * L;
+  const x0 = Math.min(k[a].x, k[b].x) - mx, x1 = Math.max(k[a].x, k[b].x) + mx, y0 = Math.min(k[a].y, k[b].y) - my, y1 = Math.max(k[a].y, k[b].y) + my;
+  const cw = (x1 - x0) * s0, ch = (y1 - y0) * s0, z = clamp(Math.min(sw / cw, sh / ch), 1, 6);
+  const cx = ox + (x0 + x1) / 2 * s0, cy = oy + (y0 + y1) / 2 * s0;
+  $('zoomLayer').style.transform = `translate(${sw / 2 - z * cx}px, ${sh / 2 - z * cy}px) scale(${z})`;
+}
+function unzoom() { $('zoomLayer').style.transform = ''; }
+$('drawBtn').onclick = () => {
+  if (drawPts) { drawPts = null; $('stage').classList.remove('marking'); $('drawHint').hidden = true; unzoom(); drawOverlay(SC.view); return; }   // pressed again: cancel
+  if (SC.busy || !SC.reps.length) return;
+  drawPts = []; markPts = null; $('stage').classList.add('marking'); $('drawHint').hidden = false;
+  $('drawHint').textContent = 'Tap the knee end: the top of the thigh just above the knee. (Frame ' + (SC.view + 1) + '; press Draw thigh line again to cancel)';
+  zoomToLeg(); drawOverlay(SC.view); $('stage').scrollIntoView({ block:'center', behavior:'smooth' });
+};
+$('clearDraw').onclick = () => { delete SC.manual[SC.view]; computeResults(); renderResults(); showFrame(SC.view); };
 $('prevF').onclick = () => showFrame(SC.view - 1);
 $('nextF').onclick = () => showFrame(SC.view + 1);
 
