@@ -586,6 +586,17 @@ function trackStep(a, b, p, v) {
   const sy = g(best.dx, best.dy - 1) != null && g(best.dx, best.dy + 1) != null ? q(g(best.dx, best.dy - 1), c0, g(best.dx, best.dy + 1)) : 0;
   return { x: p.x + best.dx + clamp(sx, -1, 1), y: p.y + best.dy + clamp(sy, -1, 1), lost: false };
 }
+// The first sideways settling of the bar doesn't count: the path starts once it is dropping almost straight down
+// (5 frames in a row moving down at over 20% of its top speed, with sideways speed under 35% of the downward speed).
+function startOfDescent(pts) {
+  const n = pts.length; if (n < 9) return 0;
+  const vx = [], vy = [];
+  for (let q = 0; q < n; q++) { const a = Math.max(0, q - 2), b = Math.min(n - 1, q + 2); vx.push((pts[b].x - pts[a].x) / (b - a)); vy.push((pts[b].y - pts[a].y) / (b - a)); }
+  const top = Math.max(...vy); if (top <= 0) return 0;
+  const ok = q => vy[q] > 0.2 * top && Math.abs(vx[q]) <= 0.35 * vy[q];
+  for (let q = 0; q + 4 < n; q++) if ([0, 1, 2, 3, 4].every(d => ok(q + d))) return q;
+  return 0;
+}
 async function traceBar(k, start, anchor) {               // start: tapped point (video px) on frame `anchor`; follow it both ways
   const rep = SC.reps[k]; if (!rep) return;
   const anchorF = clamp(anchor, rep.start, rep.end), got = new Map();
@@ -609,12 +620,13 @@ async function traceBar(k, start, anchor) {               // start: tapped point
   await run(fwd); await run(bwd);
   const pts = [...got.values()].sort((a, b) => a.f - b.f);
   if (pts.length < 5) { SC.barPath = null; return; }
-  const sm = pts.map((c, q) => { const w = pts.slice(Math.max(0, q - 1), q + 2); return Object.assign({}, c, { x: w.reduce((a, b) => a + b.x, 0) / w.length, y: w.reduce((a, b) => a + b.y, 0) / w.length }); });
+  const smAll = pts.map((c, q) => { const w = pts.slice(Math.max(0, q - 1), q + 2); return Object.assign({}, c, { x: w.reduce((a, b) => a + b.x, 0) / w.length, y: w.reduce((a, b) => a + b.y, 0) / w.length }); });
+  const s0 = startOfDescent(smAll), sm = smAll.length - s0 >= 5 ? smAll.slice(s0) : smAll;
   SC.barPath = { rep: k, pts: sm, ref: null, info: '' };
   // plumb line: straight up from the near-leg ankle (the planted foot) - how far does the bar wander from it?
   const key = SC.nearLeg === 'R' ? 'ra' : 'la', as = [];
   for (let i = rep.start; i <= rep.end; i++) { const f = SC.frames[i], a = f && f.kp && f.kp[key]; if (a && a.s >= 0.3) as.push(a); }
-  const cover = `frames ${pts[0].f + 1}-${pts[pts.length - 1].f + 1} of ${rep.start + 1}-${rep.end + 1}`;
+  const cover = `from frame ${sm[0].f + 1}, where the bar starts dropping straight down, to frame ${sm[sm.length - 1].f + 1}`;
   if (as.length >= 3 && SC.bar) {
     const ref = { x: median(as.map(a => a.x)), y: median(as.map(a => a.y)) }, { u } = axes();
     const d = sm.map(q => (q.x - ref.x) * u.x + (q.y - ref.y) * u.y), mn = Math.min(...d), mx = Math.max(...d), st = d[0];
