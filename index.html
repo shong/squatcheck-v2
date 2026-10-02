@@ -116,6 +116,7 @@ input[type=range]{width:100%;accent-color:var(--accent)}
 <section class="card" aria-labelledby="sumH">
   <h2 id="sumH">Summary</h2>
   <div class="stats" id="summary"></div>
+  <p id="warnInfo" class="small" hidden style="margin:.6em 0 0;padding:8px 12px;border-radius:8px;background:var(--bad-bg);color:var(--bad)"></p>
   <p id="doneInfo" class="muted small"></p>
 </section>
 <section class="card" aria-labelledby="repH">
@@ -303,9 +304,15 @@ function barFromGrays(grays, w, h) {
   }
   return null;
 }
-function setBar(p1, p2, auto) {
-  SC.bar = { p1, p2 }; SC.barAuto = !!auto;
-  $('barInfo').textContent = `Bar (${auto ? 'found automatically' : 'marked by hand'}): (${p1.x.toFixed(0)}, ${p1.y.toFixed(0)}) to (${p2.x.toFixed(0)}, ${p2.y.toFixed(0)}) in video pixels`;
+const MAX_BAR_TILT = 3;
+function setBar(p1, p2, auto, assumed) {
+  SC.bar = { p1, p2 }; SC.barAuto = !!auto; SC.assumedLevel = !!assumed;
+  let tilt = Math.atan2(p2.y - p1.y, p2.x - p1.x) * 180 / Math.PI; if (tilt > 90) tilt -= 180; if (tilt < -90) tilt += 180;
+  SC.warn = assumed ? "No safety bar was found, so this assumes the phone was perfectly level. Any tilt of the phone adds the same number of degrees of error. Tap Mark bar by hand to correct for tilt."
+    : Math.abs(tilt) > MAX_BAR_TILT ? `The bar is tilted ${Math.abs(tilt).toFixed(1)}° in the image. Either the phone wasn't level or this isn't the safety bar: check the cyan line, and re-mark it if it's wrong.` : '';
+  $('barInfo').textContent = assumed ? 'No safety bar found: assuming the phone was level.'
+    : `Bar (${auto ? 'found automatically' : 'marked by hand'}): (${p1.x.toFixed(0)}, ${p1.y.toFixed(0)}) to (${p2.x.toFixed(0)}, ${p2.y.toFixed(0)}) in video pixels, tilt ${tilt.toFixed(1)}°`;
+  if (SC.reps.length) { $('warnInfo').textContent = SC.warn; $('warnInfo').hidden = !SC.warn; }
   $('analyzeBtn').disabled = SC.busy;
   if (SC.pending) { SC.pending = false; guarded(finishAnalysis); return; }
   if (SC.reps.length) { computeResults(); renderResults(); setStatus('Bar re-marked: results updated without re-analysis.'); }
@@ -599,12 +606,8 @@ async function scanPhase() {
   if (!keep) {
     setStatus('Looking for the safety bar…', { pct:45 });
     const bar = barFromGrays(keepGrays, gw, gh);
-    if (!bar) {
-      SC.pending = true; startMark(true);
-      fail("Couldn't find the safety bar automatically. Tap both ends of the bar on the video to continue.");
-      return;
-    }
-    setBar(bar.p1, bar.p2, true);
+    if (bar) setBar(bar.p1, bar.p2, true);
+    else setBar({ x: 0, y: SC.vh / 2 }, { x: SC.vw, y: SC.vh / 2 }, true, true);       // carry on, assuming a level phone
   }
   await finishAnalysis();
 }
@@ -685,7 +688,7 @@ function computeResults() {
 const fmtAngle = a => a == null ? 'n/a' : `${Math.abs(a).toFixed(1)}° ${a > 0 ? 'above' : 'below'}`;
 const fmtT = i => ((i + 0.5) / FPS).toFixed(2) + ' s';
 function renderResults() {
-  $('results').hidden = false;
+  $('results').hidden = false; $('warnInfo').textContent = SC.warn || ''; $('warnInfo').hidden = !SC.warn;
   const done = SC.reps.filter(r => r.depth != null), below = done.filter(r => r.depth <= 0);
   const deepest = done.length ? Math.min(...done.map(r => r.depth)) : null;
   $('summary').innerHTML = `<div class="stat"><b>${SC.reps.length}</b>Reps found</div><div class="stat"><b>${below.length} of ${SC.reps.length}</b>Below parallel</div><div class="stat"><b>${fmtAngle(deepest)}</b>Deepest rep</div>`;
@@ -755,7 +758,7 @@ function drawOverlay(i) {
   if (!SC.bar) return;
   const k = SC.vw / 360;
   octx.lineCap = 'round'; octx.lineWidth = Math.max(2, 2 * k);
-  octx.strokeStyle = '#00d0f0'; octx.beginPath(); octx.moveTo(SC.bar.p1.x, SC.bar.p1.y); octx.lineTo(SC.bar.p2.x, SC.bar.p2.y); octx.stroke();
+  if (!SC.assumedLevel) { octx.strokeStyle = '#00d0f0'; octx.beginPath(); octx.moveTo(SC.bar.p1.x, SC.bar.p1.y); octx.lineTo(SC.bar.p2.x, SC.bar.p2.y); octx.stroke(); }   // nothing to draw when level is assumed
   const rr = SC.reps.find(r => r.measured && r.measured.includes(i)), useJoint = !!rr && rr.method === 'joint';
   const mn = SC.manual && SC.manual[i];
   if (mn) {
