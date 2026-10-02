@@ -123,7 +123,7 @@ details>summary{cursor:pointer}
     <input id="scrub" type="range" min="0" max="0" value="0" aria-label="Frame" style="margin-top:8px">
     <div class="row" style="margin-top:4px">
       <button id="prevF" type="button">◀ Prev</button><button id="nextF" type="button">Next ▶</button>
-      <button id="traceBtn" type="button">Trace barbell (rep 1)</button><button id="drawBtn" type="button">Draw thigh line</button><button id="clearDraw" type="button">Clear drawn line</button>
+      <button id="traceBtn" type="button">Trace bar end (rep 1)</button><button id="drawBtn" type="button">Draw thigh line</button><button id="clearDraw" type="button">Clear drawn line</button>
     </div>
     <p id="drawHint" class="muted small" hidden></p>
     <div id="caption" aria-live="polite"></div>
@@ -557,7 +557,7 @@ async function measureFrame(i) {                           // the frame is alrea
 }
 
 /* ---------- barbell path: follow the end of the barbell through a rep (you tap it once, the app follows it) ---------- */
-const TW = 240, TR = 22, TS = 14, tc = document.createElement('canvas'), tctx = tc.getContext('2d', { willReadFrequently:true });
+const TW = 240, TR = 13, TS = 14, tc = document.createElement('canvas'), tctx = tc.getContext('2d', { willReadFrequently:true });
 function grayOf(src) {
   const w = TW, h = Math.round(src.height * TW / src.width); tc.width = w; tc.height = h; tctx.drawImage(src, 0, 0, w, h);
   const d = tctx.getImageData(0, 0, w, h).data, g = new Float32Array(w * h);
@@ -578,51 +578,66 @@ function trackStep(a, b, p, v) {
     let c = 0; for (let k = 0; k < n; k++) { const d = (ta[k] - ma) - (b.g[(Y + py[k]) * w + X + px[k]] - mb); c += d * d; }
     cost.set(dx + ',' + dy, c); if (!best || c < best.c) best = { dx, dy, c };
   }
-  if (!best) return { x: p.x + v.x, y: p.y + v.y, lost: true };
+  let va = 0; for (let k = 0; k < n; k++) va += (ta[k] - ma) * (ta[k] - ma);
+  if (!best || best.c > 0.9 * va) return { x: p.x + v.x, y: p.y + v.y, lost: true };       // nothing in range looks like the patch any more
   const q = (m, z, pl) => { const d = m + pl - 2 * z; return d > 1e-6 ? 0.5 * (m - pl) / d : 0; };   // parabola vertex for sub-pixel
   const g = (dx, dy) => cost.get(dx + ',' + dy), c0 = best.c;
   const sx = g(best.dx - 1, best.dy) != null && g(best.dx + 1, best.dy) != null ? q(g(best.dx - 1, best.dy), c0, g(best.dx + 1, best.dy)) : 0;
   const sy = g(best.dx, best.dy - 1) != null && g(best.dx, best.dy + 1) != null ? q(g(best.dx, best.dy - 1), c0, g(best.dx, best.dy + 1)) : 0;
   return { x: p.x + best.dx + clamp(sx, -1, 1), y: p.y + best.dy + clamp(sy, -1, 1), lost: false };
 }
-async function traceBar(k, start) {                        // start: the tapped point in video pixels, on the rep's first frame
+async function traceBar(k, start, anchor) {               // start: tapped point (video px) on frame `anchor`; follow it both ways
   const rep = SC.reps[k]; if (!rep) return;
-  const list = []; for (let i = rep.start; i <= rep.end; i++) list.push(i);
-  const pts = []; let prevG = null, p = null, v = { x: 0, y: 0 };
-  await forFrames(list, async (i, q) => {
-    setStatus(`Tracing the barbell, rep ${k + 1}: frame ${i + 1}`, { pct: 100 * q / list.length });
-    const gr = grayOf(acv);
-    if (!p) p = { x: start.x * gr.w / SC.vw, y: start.y * gr.h / SC.vh, lost: false };
-    else { const np = trackStep(prevG, gr, p, v); v = { x: 0.6 * v.x + 0.4 * (np.x - p.x), y: 0.6 * v.y + 0.4 * (np.y - p.y) }; p = np; }
-    prevG = gr; pts.push({ f: i, x: p.x * SC.vw / gr.w, y: p.y * SC.vh / gr.h, lost: !!p.lost });
-  });
+  const anchorF = clamp(anchor, rep.start, rep.end), got = new Map();
+  const run = async list => {                              // list[0] is the anchor frame; stop at the first frame where the end is lost
+    let prevG = null, p = null, v = { x: 0, y: 0 }, stopped = false;
+    await forFrames(list, async (i, q) => {
+      setStatus(`Tracing the bar end, rep ${k + 1}: frame ${i + 1}`, { pct: 100 * (got.size) / (rep.end - rep.start + 1) });
+      if (stopped) return;
+      const gr = grayOf(acv);
+      if (!p) p = { x: start.x * gr.w / SC.vw, y: start.y * gr.h / SC.vh, lost: false };
+      else {
+        const np = trackStep(prevG, gr, p, v);
+        if (np.lost) { stopped = true; return; }
+        v = { x: 0.6 * v.x + 0.4 * (np.x - p.x), y: 0.6 * v.y + 0.4 * (np.y - p.y) }; p = np;
+      }
+      prevG = gr; got.set(i, { f: i, x: p.x * SC.vw / gr.w, y: p.y * SC.vh / gr.h });
+    });
+  };
+  const fwd = []; for (let i = anchorF; i <= rep.end; i++) fwd.push(i);
+  const bwd = []; for (let i = anchorF; i >= rep.start; i--) bwd.push(i);
+  await run(fwd); await run(bwd);
+  const pts = [...got.values()].sort((a, b) => a.f - b.f);
+  if (pts.length < 5) { SC.barPath = null; return; }
   const sm = pts.map((c, q) => { const w = pts.slice(Math.max(0, q - 1), q + 2); return Object.assign({}, c, { x: w.reduce((a, b) => a + b.x, 0) / w.length, y: w.reduce((a, b) => a + b.y, 0) / w.length }); });
   SC.barPath = { rep: k, pts: sm, ref: null, info: '' };
   // plumb line: straight up from the near-leg ankle (the planted foot) - how far does the bar wander from it?
   const key = SC.nearLeg === 'R' ? 'ra' : 'la', as = [];
   for (let i = rep.start; i <= rep.end; i++) { const f = SC.frames[i], a = f && f.kp && f.kp[key]; if (a && a.s >= 0.3) as.push(a); }
+  const cover = `frames ${pts[0].f + 1}-${pts[pts.length - 1].f + 1} of ${rep.start + 1}-${rep.end + 1}`;
   if (as.length >= 3 && SC.bar) {
     const ref = { x: median(as.map(a => a.x)), y: median(as.map(a => a.y)) }, { u } = axes();
     const d = sm.map(q => (q.x - ref.x) * u.x + (q.y - ref.y) * u.y), mn = Math.min(...d), mx = Math.max(...d), st = d[0];
     const side = v => Math.abs(v) < 1 ? 'on the line' : Math.abs(Math.round(v)) + ' px ' + (v > 0 ? 'right' : 'left') + ' of the line';
     SC.barPath.ref = ref;
-    SC.barPath.info = `Bar path, rep ${k + 1}: starts ${side(st)}, ends ${side(d[d.length - 1])}; sideways travel ${(mx - mn).toFixed(0)} px (from ${side(mn)} to ${side(mx)}). The dashed line goes straight up from the planted ankle.`;
-  } else SC.barPath.info = `Bar path, rep ${k + 1}: no foot reference was found, so only the path is drawn.`;
+    SC.barPath.info = `Bar end, rep ${k + 1} (${cover}): starts ${side(st)}, ends ${side(d[d.length - 1])}; sideways travel ${(mx - mn).toFixed(0)} px (from ${side(mn)} to ${side(mx)}). The dashed line goes straight up from the planted ankle.`;
+  } else SC.barPath.info = `Bar end, rep ${k + 1} (${cover}): no foot reference was found, so only the path is drawn.`;
 }
 let traceMode = false;
 $('traceBtn').onclick = () => {
   if (SC.busy || !SC.reps.length) return;
   if (traceMode) { traceMode = false; $('stage').classList.remove('marking'); $('drawHint').hidden = true; return; }
   traceMode = true; drawPts = null; markPts = null; $('stage').classList.add('marking'); $('drawHint').hidden = false;
-  $('drawHint').textContent = "Tap the end of the barbell (the centre of the plate). Rep 1's first frame is shown. Press Trace barbell again to cancel.";
-  SC.barPath = null; $('pathInfo').hidden = true; showFrame(SC.reps[0].start);
+  $('drawHint').textContent = "Scrub to a frame of rep 1 where the end of the bar (the tip of the sleeve past the plate) is clearly visible, then tap it. Press Trace bar end again to cancel.";
+  SC.barPath = null; $('pathInfo').hidden = true; const r0 = SC.reps[0]; showFrame(SC.view >= r0.start && SC.view <= r0.end ? SC.view : r0.low);
 };
 async function runTrace(pt) {
   traceMode = false; $('stage').classList.remove('marking'); $('drawHint').hidden = true;
-  await guarded(async () => { await traceBar(0, pt); });
-  setStatus(SC.barPath ? 'Barbell path traced for rep 1 (yellow line).' : 'Could not trace the barbell.');
+  const anchor = SC.view;
+  await guarded(async () => { await traceBar(0, pt, anchor); });
+  setStatus(SC.barPath ? 'Bar end traced for rep 1 (yellow line).' : "Could not follow the bar end. Try a frame where it's sharper, or tap closer to the tip.");
   $('pathInfo').textContent = SC.barPath ? SC.barPath.info : ''; $('pathInfo').hidden = !SC.barPath;
-  showFrame(SC.reps[0].start);
+  showFrame(anchor);
 }
 
 /* ---------- analysis ---------- */
