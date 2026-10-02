@@ -477,14 +477,33 @@ function fitThigh(px, py, hip, knee) {
   const end = t => ({ x: cx + t * a.x + (f.c0 + f.c1 * t) * top.x, y: cy + t * a.y + (f.c0 + f.c1 * t) * top.y });
   return { k: end(tmin), h: end(tmax) };
 }
+// Pixels labelled as this leg's upper leg, reduced to the biggest 8-connected blob: dark plates or kit
+// next to dark trousers get stray thigh labels, and those would otherwise drag the fitted line sideways.
+function largestBlob(seg, ids) {
+  const { w, h, data } = seg, lab = new Int32Array(w * h), stack = [];
+  let best = null, bestN = 0, id = 0;
+  for (let s0 = 0; s0 < w * h; s0++) {
+    const v = data[s0]; if ((v !== ids[0] && v !== ids[1]) || lab[s0]) continue;
+    id++; const pts = []; lab[s0] = id; stack.push(s0);
+    while (stack.length) {
+      const q = stack.pop(); pts.push(q); const x = q % w, y = (q / w) | 0;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+        const nx = x + dx, ny = y + dy; if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+        const r = ny * w + nx, u = data[r]; if (!lab[r] && (u === ids[0] || u === ids[1])) { lab[r] = id; stack.push(r); }
+      }
+    }
+    if (pts.length > bestN) { bestN = pts.length; best = pts; }
+  }
+  const px = [], py = []; if (best) for (const q of best) { px.push(q % w); py.push((q / w) | 0); }
+  return { px, py };
+}
 async function measureFrame(i) {                           // the frame is already on acv
   const sx = SC.vw / acv.width, sy = SC.vh / acv.height, f = SC.frames[i];
   const cnt = { L:0, R:0 }, lines = { L:null, R:null };
   const seg = await bodyParts();
   if (seg) {
     for (const [leg, ids, hk, kk] of [['L', [14, 15], 'lh', 'lk'], ['R', [16, 17], 'rh', 'rk']]) {
-      const px = [], py = [];
-      for (let y = 0; y < seg.h; y++) for (let x = 0; x < seg.w; x++) { const v = seg.data[y * seg.w + x]; if (v === ids[0] || v === ids[1]) { px.push(x); py.push(y); } }
+      const { px, py } = largestBlob(seg, ids);
       cnt[leg] = px.length;
       const hip = f.kp[hk], knee = f.kp[kk];
       if (px.length >= 150 && hip && hip.s >= 0.3 && knee) {
