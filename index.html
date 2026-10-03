@@ -108,6 +108,7 @@ details>summary{cursor:pointer}
       <li>Film side-on, with the phone propped at about hip height, level and held still.</li>
       <li>Keep the whole lifter and the near safety bar in frame, including the knee at the bottom.</li>
       <li>Use a power rack with safety bars set at parallel; one lifter in view.</li>
+      <li>Use the back camera, not the selfie camera: its wide lens bends perspective more, so measurements are less reliable.</li>
       <li>For the bar path: put the camera directly in line with the barbell so the plate faces the lens, 3 m or more back, at about chest height and level (not tilted up). Then the sleeve end sits over the bar's centre and the white dot at mid-foot is a fair comparison.</li>
     </ul>
   </details>
@@ -120,7 +121,7 @@ details>summary{cursor:pointer}
 <section class="card" aria-label="Video">
   <div id="stage"><div id="zoomLayer"><video id="video" muted playsinline preload="auto"></video><canvas id="ov"></canvas></div></div>
   <div id="viewerCtl" hidden>
-    <div class="row toggles"><label><input type="checkbox" id="showDepth" checked> Depth line</label><label><input type="checkbox" id="showPath" checked> Bar tip path</label><label><input type="checkbox" id="showCentre" checked> Bar centre vs mid-foot</label><label>Camera lens <select id="lens"><option value="main">Main (1×)</option><option value="tele">2× zoom</option><option value="wide">Ultra-wide</option></select></label></div>
+    <div class="row toggles"><label><input type="checkbox" id="showDepth" checked> Depth line</label><label><input type="checkbox" id="showPath" checked> Bar tip path</label><label><input type="checkbox" id="showCentre" checked> Bar centre vs mid-foot</label><label>Camera lens <select id="lens"><option value="auto" hidden>From the video</option><option value="main">Main (1×)</option><option value="tele">2× zoom</option><option value="wide">Ultra-wide</option></select></label></div>
     <input id="scrub" type="range" min="0" max="0" value="0" aria-label="Frame" style="margin-top:8px">
     <div class="row" style="margin-top:4px">
       <button id="prevF" type="button">◀ Prev</button><button id="nextF" type="button">Next ▶</button>
@@ -236,7 +237,7 @@ function loadVideo(url, revoke) {
   const my = ++loadSeq;
   if (objectUrl) URL.revokeObjectURL(objectUrl);
   objectUrl = revoke ? url : null;
-  resetResults(); $('workArea').hidden = true; markPts = null; SC.bar = null;
+  resetResults(); $('workArea').hidden = true; markPts = null; SC.bar = null; setCam(null);
   setStatus('Loading video…', { pct:10 });
   video.onerror = () => { if (my === loadSeq) fail("This browser can't play that file. Try an MP4 (H.264) or WebM video, or record in the app."); };
   video.onloadedmetadata = () => { if (my === loadSeq) onMeta(my); };
@@ -783,6 +784,54 @@ async function traceBar(k, start, anchor) {               // start: tapped point
 // The sleeve end is closer to the camera than the lifter, so its sideways movement is magnified. The plate (45 cm across) gives the
 // distance; the bar axis is taken as horizontal and pointing at the camera, so the bar's centre is 1.10 m behind the tip and the
 // plate centre 0.42 m behind it. Everything is worked in a level frame (the camera's tilt comes from the rack uprights).
+// Phones write the lens into the video file. iPhone .MOV/.MP4 keep it as 'mdta' metadata inside the 'moov' atom, so read just
+// that atom (not the whole file) and pull out the model, the lens and the 35 mm-equivalent focal length.
+async function readCameraMeta(file) {
+  try {
+    const tag = (dv, o) => String.fromCharCode(dv.getUint8(o), dv.getUint8(o + 1), dv.getUint8(o + 2), dv.getUint8(o + 3));
+    let off = 0, moov = null;
+    while (off < file.size) {
+      const h = new DataView(await file.slice(off, off + 16).arrayBuffer()); if (h.byteLength < 8) break;
+      let size = h.getUint32(0), hdr = 8; const t = tag(h, 4);
+      if (size === 1 && h.byteLength >= 16) { size = Number(h.getBigUint64(8)); hdr = 16; } else if (size === 0) size = file.size - off;
+      if (t === 'moov') { moov = { s: off + hdr, e: off + size }; break; }
+      if (size < 8) break; off += size;
+    }
+    if (!moov || moov.e - moov.s > 64e6) return null;
+    const buf = await file.slice(moov.s, moov.e).arrayBuffer(), dv = new DataView(buf), bytes = new Uint8Array(buf), dec = new TextDecoder(), out = {};
+    const val = (type, s0, e0) => { const len = e0 - s0; if (type === 1) return dec.decode(bytes.subarray(s0, e0)); if (type === 23 && len === 4) return dv.getFloat32(s0); if (type === 24 && len === 8) return dv.getFloat64(s0);
+      if ((type === 21 || type === 22) && len <= 4) { let v = 0; for (let i = 0; i < len; i++) v = v * 256 + bytes[s0 + i]; return v; } return null; };
+    const meta = (start, end) => {
+      const keys = []; let o = start;
+      while (o + 8 <= end) {
+        const size = dv.getUint32(o), t = tag(dv, o + 4); if (size < 8 || o + size > end) break;
+        if (t === 'keys') { const n = dv.getUint32(o + 12); let p = o + 16; for (let i = 0; i < n; i++) { const ks = dv.getUint32(p); keys.push(dec.decode(bytes.subarray(p + 8, p + ks))); p += ks; } }
+        else if (t === 'ilst') { let p = o + 8; while (p + 8 <= o + size) { const is = dv.getUint32(p), idx = dv.getUint32(p + 4); if (is < 8) break; const ds = dv.getUint32(p + 8), key = keys[idx - 1]; if (key) out[key] = val(dv.getUint32(p + 16) & 0xffffff, p + 24, p + 8 + ds); p += is; } }
+        o += size;
+      }
+    };
+    const walk = (start, end) => {
+      let o = start;
+      while (o + 8 <= end) {
+        let size = dv.getUint32(o), hdr = 8; const t = tag(dv, o + 4); if (size === 1) { size = Number(dv.getBigUint64(o + 8)); hdr = 16; }
+        if (size < 8 || o + size > end) break;
+        if (t === 'trak' || t === 'mdia' || t === 'minf') walk(o + hdr, o + size);
+        else if (t === 'meta') { let s0 = o + hdr; if (s0 + 8 <= o + size && tag(dv, s0 + 4) !== 'hdlr') s0 += 4; meta(s0, o + size); }
+        o += size;
+      }
+    };
+    walk(0, buf.byteLength);
+    const f35 = Number(out['com.apple.quicktime.camera.focal_length.35mm_equivalent']);
+    const cam = { model: out['com.apple.quicktime.model'] || null, lens: out['com.apple.quicktime.camera.lens_model'] || null, f35: f35 > 0 ? f35 : null };
+    return cam.model || cam.lens || cam.f35 ? cam : null;
+  } catch (e) { console.warn('camera metadata not readable', e); return null; }
+}
+function setCam(c) {                                       // c: { model, lens, f35 } or null
+  SC.cam = c && c.f35 ? c : null;
+  const o = $('lens').querySelector('option[value="auto"]');
+  o.hidden = !SC.cam; if (SC.cam) { o.textContent = `From the video: ${SC.cam.model || 'camera'}, ${SC.cam.f35} mm equiv.`; $('lens').value = 'auto'; } else if ($('lens').value === 'auto') $('lens').value = 'main';
+  if (SC.barPath) { computeCentre(); showPathInfo(); showFrame(SC.view); }
+}
 const LENSES = { main: { fov: 63, label: 'main camera (1x)' }, tele: { fov: 34, label: '2x zoom' }, wide: { fov: 107, label: 'ultra-wide' } };   // field of view across the longer side of the frame
 const PLATE_D = 0.45, TIP_TO_CENTRE = 1.10, TIP_TO_PLATE = 0.42;
 function computeCentre() {
@@ -790,7 +839,8 @@ function computeCentre() {
   B.centre = null; B.centreInfo = '';
   const pl = B.plate;
   if (!pl || pl.score < 0.25) { B.centreInfo = "The plate couldn't be measured on this frame, so the bar centre isn't estimated."; return; }
-  const lens = LENSES[$('lens').value] || LENSES.main, f = Math.max(SC.vw, SC.vh) / (2 * Math.tan(lens.fov * Math.PI / 360)), cx = SC.vw / 2, cy = SC.vh / 2;
+  const auto = $('lens').value === 'auto' && SC.cam && SC.cam.f35, lens = auto ? { label: `${(SC.cam.lens || SC.cam.model || 'the camera')} (${SC.cam.f35} mm equivalent, read from the video)` } : (LENSES[$('lens').value] || LENSES.main);
+  const f = auto ? Math.hypot(SC.vw, SC.vh) * SC.cam.f35 / 43.27 : Math.max(SC.vw, SC.vh) / (2 * Math.tan(lens.fov * Math.PI / 360)), cx = SC.vw / 2, cy = SC.vh / 2;
   let pitch = 0; if (SC.vert && SC.vert.vp) { const d = cy - SC.vert.vp.y; pitch = Math.sign(d || 1) * Math.atan(f / Math.abs(d)); }       // camera looking up = positive
   const cp = Math.cos(pitch), sp = Math.sin(pitch);
   const toLevel = (X, Y, Z) => ({ x: X, y: Y * cp - Z * sp, z: Y * sp + Z * cp }), fromLevel = P => ({ x: P.x, y: P.y * cp + P.z * sp, z: -P.y * sp + P.z * cp });
@@ -809,7 +859,8 @@ function computeCentre() {
   B.centre = { pts, offBottom: oB, offStart: o0, drift: dr, zTip, zC, mag: zC / zTip, pitchDeg: pitch * 180 / Math.PI };
   B.centreInfo = `Bar centre estimate (${lens.label}, 45 cm plate, camera facing along the bar, tilt ${(pitch * 180 / Math.PI).toFixed(0)}° up): the plate is ${(2 * pl.a).toFixed(0)} px across, so the sleeve end is about ${zTip.toFixed(1)} m from the camera and the bar's centre about ${zC.toFixed(1)} m, which magnifies the tip's sideways movement about ${(zC / zTip).toFixed(1)}× compared with the bar centre's.`
     + (oB != null ? ` At the bottom the bar's centre is about ${toward(oB)} of mid-foot (the green line and white dot), assuming the foot is as far from the camera as the bar's centre; if the bar was centred over mid-foot when the descent started, that becomes ${toward(oB - o0)}.` : '')
-    + ` Over the rep the bar centre moves sideways by at most ${dr.toFixed(1)} cm. These depend on the lens setting and the plate being 45 cm, so treat them as estimates.`;
+    + ` Over the rep the bar centre moves sideways by at most ${dr.toFixed(1)} cm. These depend on the lens setting and the plate being 45 cm, so treat them as estimates.`
+    + (SC.cam && /front/i.test(SC.cam.lens || '') ? " This was filmed with the front camera, whose wide lens exaggerates perspective; the back camera at 2× gives more reliable readings." : '');
 }
 function showPathInfo() {
   const B = SC.barPath;
@@ -1195,12 +1246,13 @@ $('file').onchange = e => { const f = e.target.files[0]; if (f) fromFile(f); e.t
 function fromFile(f) {
   if (f.type && !f.type.startsWith('video/')) { fail('That file is not a video. Choose an MP4 or WebM video.'); return; }
   loadVideo(URL.createObjectURL(f), true);
+  readCameraMeta(f).then(c => { if (c) setCam(c); });
 }
 const drop = $('drop');
 ['dragenter', 'dragover'].forEach(t => drop.addEventListener(t, e => { e.preventDefault(); drop.classList.add('over'); }));
 ['dragleave', 'drop'].forEach(t => drop.addEventListener(t, e => { e.preventDefault(); drop.classList.remove('over'); }));
 drop.addEventListener('drop', e => { const f = e.dataTransfer.files[0]; if (f) fromFile(f); });
-$('sampleBtn').onclick = () => loadVideo('./samples/first-rep.mp4', false);
+$('sampleBtn').onclick = () => { loadVideo('./samples/first-rep.mp4', false); fetch('./samples/first-rep.meta.json').then(r => r.ok ? r.json() : null).then(c => { if (c) setCam(c); }).catch(() => {}); };
 $('markBtn').onclick = startMark;
 $('analyzeBtn').onclick = analyze;
 loadModels(true).catch(() => {});                          // warm the models while the user picks a video
