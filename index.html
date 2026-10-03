@@ -1044,7 +1044,7 @@ const drop = $('drop');
 ['dragenter', 'dragover'].forEach(t => drop.addEventListener(t, e => { e.preventDefault(); drop.classList.add('over'); }));
 ['dragleave', 'drop'].forEach(t => drop.addEventListener(t, e => { e.preventDefault(); drop.classList.remove('over'); }));
 drop.addEventListener('drop', e => { const f = e.dataTransfer.files[0]; if (f) fromFile(f); });
-$('sampleBtn').onclick = () => loadVideo('./samples/five-squats.mp4', false);
+$('sampleBtn').onclick = () => loadVideo('./samples/first-rep.mp4', false);
 $('markBtn').onclick = startMark;
 $('analyzeBtn').onclick = analyze;
 loadModels(true).catch(() => {});                          // warm the models while the user picks a video
