@@ -170,7 +170,7 @@ details>summary{cursor:pointer}
 const FPS = 30, AN_LONG = 540;
 // Depth measurement (thigh angle, parallel verdicts, depth lines) is switched off while the bar path is being tested.
 // Set DEPTH_ON to true to bring all of it back.
-const DEPTH_ON = false;
+const DEPTH_ON = true;
 const SC = window.SC = { manual:{}, vw:0, vh:0, dur:0, N:0, bar:null, barAuto:false, frames:[], reps:[], nearLeg:null, busy:false, stats:{pose:0,seg:0}, view:0 };
 const $ = id => document.getElementById(id);
 const video = $('video'), ov = $('ov'), octx = ov.getContext('2d');
@@ -1213,7 +1213,7 @@ async function showFrame(i) {
   else if (!SC.reps.length) why = 'Not analyzed yet.';
   else why = 'Not measured: only the lowest frame of each rep and 2 either side are measured.';
   const jt = jointTheta(i), hand = SC.manual && SC.manual[i];
-  $('caption').textContent = `Frame ${i + 1} of ${SC.N} · ${fmtT(i)}. ${why}` + (jt != null ? ` Joint line (hip to knee): ${fmtAngle(jt)}; estimate from joints${$('showDepth').checked ? ' (pink line)' : ''}: ${fmtAngle(jt - JOINT_OFFSET)}.` : '') + (hand ? ` Hand-drawn: ${fmtAngle(theta(hand))}.` : '') + (SC.barPath && $('showPath').checked ? ' Yellow: path of the barbell end, rep ' + (SC.barPath.rep + 1) + '.' : '');
+  $('caption').textContent = `Frame ${i + 1} of ${SC.N} · ${fmtT(i)}. ${why}` + (jt != null ? ` Joint line (hip to knee): ${fmtAngle(jt)}; estimate from joints${$('showDepth').checked ? ' (pink line)' : ''}: ${fmtAngle(jt - JOINT_OFFSET)}.` : '') + (hand ? ` Hand-drawn: ${fmtAngle(theta(hand))}.` : '') + (SC.barPath && $('showPath').checked ? ' Yellow: path of the barbell end, rep ' + (SC.barPath.rep + 1) + '.' : '') + (SC.barPath && SC.barPath.centre && $('showCentre').checked ? ' Cyan: estimated path of the bar centre. Green dashes and white dot: straight up from the middle of the planted foot.' : '');
 }
 $('scrub').addEventListener('input', e => showFrame(+e.target.value));
 $('showDepth').onchange = $('showPath').onchange = $('showCentre').onchange = () => showFrame(SC.view);
