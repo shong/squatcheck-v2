@@ -262,10 +262,50 @@ function applyMeta(w, h, dur) {
   $('analyzeBtn').disabled = false; drawOverlay(0);
 }
 /* ---------- safety bar detection (from the quick-scan frames, no extra seeks) ---------- */
+function medianOf(grays, w, h) {                           // per-pixel median of several frames: the lifter moves, the rack doesn't
+  const n = grays.length, med = new Uint8Array(w * h), tmp = new Uint8Array(n);
+  for (let p = 0; p < w * h; p++) { for (let k = 0; k < n; k++) tmp[k] = grays[k][p]; tmp.sort(); med[p] = tmp[n >> 1]; }
+  return med;
+}
+// The rack uprights are truly vertical, so how they lean shows how the camera bends "vertical": a phone looking up makes them
+// converge. Fit the strongest near-vertical line on the left and on the right; where they meet is the vertical vanishing point.
+function findVertical(grays, w, h) {
+  if (grays.length < 3) return null;
+  const med = medianOf(grays, w, h), ex = [], ey = [], ew = [];
+  for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
+    const i = y * w + x, a = med[i-w-1], b = med[i-w], c = med[i-w+1], d = med[i-1], f = med[i+1], g = med[i+w-1], q = med[i+w], r = med[i+w+1];
+    const gx = (c + 2*f + r) - (a + 2*d + g), gy = (g + 2*q + r) - (a + 2*b + c), m = Math.hypot(gx, gy);
+    if (m > 120 && Math.abs(gx) >= 2 * Math.abs(gy)) { ex.push(x); ey.push(y); ew.push(m); }
+  }
+  const fit = (x0, x1) => {
+    let best = null;
+    for (let t = -12; t <= 12; t += 0.25) {
+      const th = t * Math.PI / 180, co = Math.cos(th), si = Math.sin(th), acc = new Map();
+      for (let e = 0; e < ex.length; e++) { if (ex[e] < x0 || ex[e] > x1) continue; const rr = Math.round(ex[e] * co + ey[e] * si); acc.set(rr, (acc.get(rr) || 0) + ew[e]); }
+      for (const [rr, v] of acc) if (!best || v > best.v) best = { v, t, rho: rr };
+    }
+    if (!best) return null;
+    const th = best.t * Math.PI / 180, co = Math.cos(th), si = Math.sin(th); let n = 0, y0 = 1e9, y1 = -1e9;
+    for (let e = 0; e < ex.length; e++) if (Math.abs(ex[e] * co + ey[e] * si - best.rho) <= 1.2) { n++; y0 = Math.min(y0, ey[e]); y1 = Math.max(y1, ey[e]); }
+    return n >= 120 && y1 - y0 >= 0.3 * h ? { t: best.t, a: best.rho / co, b: Math.tan(th) } : null;     // x = a - b*y
+  };
+  const lines = [fit(0, 0.35 * w), fit(0.65 * w, w)].filter(Boolean); if (!lines.length) return null;
+  const k = SC.vw / w;
+  if (lines.length === 2 && Math.abs(lines[0].b - lines[1].b) > 1e-4) {
+    const y = (lines[0].a - lines[1].a) / (lines[0].b - lines[1].b), x = lines[0].a - lines[0].b * y;
+    if (Math.hypot(x - w / 2, y - h / 2) > 0.8 * h) return { vp: { x: x * k, y: y * k }, conv: Math.abs(lines[0].t - lines[1].t), tilt: null };
+  }
+  return { vp: null, conv: 0, tilt: lines.reduce((a, l) => a + l.t, 0) / lines.length };
+}
+function upAt(p) {                                          // the world-vertical direction (up) in the image at point p
+  const V = SC.vert;
+  if (V && V.vp) { let vx = V.vp.x - p.x, vy = V.vp.y - p.y; if (vy > 0) { vx = -vx; vy = -vy; } const L = Math.hypot(vx, vy) || 1; return { x: vx / L, y: vy / L }; }
+  if (V && V.tilt != null) { const tx = Math.tan(V.tilt * Math.PI / 180), L = Math.hypot(tx, 1); return { x: tx / L, y: -1 / L }; }
+  return axes().n;                                          // no uprights found: perpendicular to the safety bar
+}
 function barFromGrays(grays, w, h) {
   const n = grays.length; if (n < 3) return null;
-  const med = new Uint8Array(w * h), tmp = new Uint8Array(n);
-  for (let p = 0; p < w * h; p++) { for (let k = 0; k < n; k++) tmp[k] = grays[k][p]; tmp.sort(); med[p] = tmp[n >> 1]; }
+  const med = medianOf(grays, w, h);
   // Sobel
   const gxA = new Float32Array(w * h), gyA = new Float32Array(w * h), mag = new Float32Array(w * h), hist = new Uint32Array(2048);
   for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
@@ -695,13 +735,15 @@ async function traceBar(k, start, anchor) {               // start: tapped point
     refPt = { x: ax + dir * 0.16 * shin, y: ay }; refKind = 'a little ahead of the planted ankle (about mid-foot)';
   }
   const cover = `from frame ${sm[0].f + 1}, where the bar starts dropping straight down, to frame ${sm[sm.length - 1].f + 1}, where it stops rising straight up`;
-  if (refPt && SC.bar) {
-    const ref = refPt, { u } = axes();
-    const d = sm.map(q => (q.x - ref.x) * u.x + (q.y - ref.y) * u.y), mn = Math.min(...d), mx = Math.max(...d), st = d[0];
-    const side = v => Math.abs(v) < 1 ? 'on the line' : Math.abs(Math.round(v)) + ' px ' + (v > 0 ? 'right' : 'left') + ' of the line';
-    SC.barPath.ref = ref;
-    SC.barPath.info = `Bar end, rep ${k + 1} (${cover}): starts ${side(st)}, ends ${side(d[d.length - 1])}; sideways travel ${(mx - mn).toFixed(0)} px (from ${side(mn)} to ${side(mx)}). The dashed line goes straight up from ${refKind}.`;
-  } else SC.barPath.info = `Bar end, rep ${k + 1} (${cover}): no foot reference was found, so only the path is drawn.`;
+  // judged against a straight drop from where the bar started falling: the world-vertical line through that point
+  const P0 = sm[0], up0 = upAt(P0), right0 = { x: -up0.y, y: up0.x };
+  const dev = sm.map(q => (q.x - P0.x) * right0.x + (q.y - P0.y) * right0.y), maxDev = Math.max(...dev.map(Math.abs)), endDev = dev[dev.length - 1];
+  const side = v => Math.abs(v) < 1 ? 'on it' : Math.abs(Math.round(v)) + ' px ' + (v > 0 ? 'right' : 'left') + ' of it';
+  const V = SC.vert, vertNote = V ? (V.vp ? `corrected for the camera's tilt using the rack uprights, which converge by ${V.conv.toFixed(1)}°` : 'corrected using the lean of the rack uprights') : 'taken as perpendicular to the safety bar, because no rack uprights were found';
+  SC.barPath.start = { p: P0, up: up0 };
+  let foot = '';
+  if (refPt) { SC.barPath.ref = refPt; const off = (P0.x - refPt.x) * right0.x + (P0.y - refPt.y) * right0.y; foot = ` For context, the dashed white line goes straight up from ${refKind}, and the bar started ${Math.abs(Math.round(off))} px ${off > 0 ? 'right' : 'left'} of it. The sleeve end is closer to the camera than the lifter, so that gap depends on the camera angle and isn't judged.`; }
+  SC.barPath.info = `Bar end, rep ${k + 1} (${cover}): measured against a straight drop from where it started falling (vertical ${vertNote}). It strays at most ${maxDev.toFixed(0)} px from that line and ends ${side(endDev)}.${foot}`;
 }
 let traceMode = false;
 $('traceBtn').onclick = () => {
@@ -756,7 +798,7 @@ async function scanPhase() {
   const onFrame = async i => {
     setStatus(`Quick scan: ${((i + 0.5) / FPS).toFixed(1)} of ${SC.dur.toFixed(1)} s`, { pct: 8 + 37 * i / SC.N });
     await poseFrame(i);
-    if (!keep && nextK < nb && (i + 0.5) / FPS >= (nextK + 0.5) / nb * SC.dur) {      // bar image: ~3 frames per second of video, 3-15 in all
+    if (nextK < nb && (i + 0.5) / FPS >= (nextK + 0.5) / nb * SC.dur) {                // bar image: ~3 frames per second of video, 3-15 in all
       nextK++; gx.drawImage(acv, 0, 0, gw, gh);
       const d = gx.getImageData(0, 0, gw, gh).data, g = new Uint8Array(gw * gh);
       for (let p = 0; p < gw * gh; p++) g[p] = (0.299 * d[4*p] + 0.587 * d[4*p+1] + 0.114 * d[4*p+2]) | 0;
@@ -779,6 +821,7 @@ async function scanPhase() {
   }
   SC.samples = samples;
   const keepGrays = grays;
+  try { SC.vert = findVertical(keepGrays, gw, gh); } catch (e) { console.warn('vertical fit failed', e); SC.vert = null; }
   if (!keep) {
     setStatus('Looking for the safety bar…', { pct:45 });
     const bar = barFromGrays(keepGrays, gw, gh);
@@ -847,7 +890,7 @@ async function finishAnalysis() {
 }
 function setBusy(b) { for (const id of ['analyzeBtn', 'markBtn', 'pick', 'sampleBtn', 'recBtn']) $(id).disabled = b; }
 function resetResults() {
-  SC.frames = []; SC.reps = []; SC.nearLeg = null; SC.view = 0; SC.manual = {}; drawPts = null; SC.barPath = null;
+  SC.frames = []; SC.reps = []; SC.nearLeg = null; SC.view = 0; SC.manual = {}; drawPts = null; SC.barPath = null; SC.vert = null;
   $('results').hidden = true; $('summaryCard').hidden = true; $('viewerCtl').hidden = true; $('tipsNoReps').hidden = true;
 }
 function computeResults() {
@@ -963,12 +1006,14 @@ function drawOverlay(i) {
   if (DEPTH_ON && !SC.assumedLevel) { octx.strokeStyle = '#00d0f0'; octx.beginPath(); octx.moveTo(SC.bar.p1.x, SC.bar.p1.y); octx.lineTo(SC.bar.p2.x, SC.bar.p2.y); octx.stroke(); }   // nothing to draw when level is assumed
   if (SC.barPath && !drawPts && showPath) {                // barbell-end path for rep 1 (yellow), with the plate outline at this frame
     const P = SC.barPath.pts; octx.lineJoin = 'round';
-    if (SC.barPath.ref) {
-      const { n } = axes(), r0 = SC.barPath.ref, top = Math.min(...P.map(q => q.y)) - 40 * k, tUp = Math.max(60, (r0.y - top) / Math.max(0.3, Math.abs(n.y))), tDn = 25 * k;
-      octx.setLineDash([10 * k, 7 * k]);
-      for (const [col, wd] of [['#000', 4], ['#fff', 2]]) { octx.strokeStyle = col; octx.lineWidth = Math.max(wd, wd * k); octx.beginPath(); octx.moveTo(r0.x + n.x * tUp, r0.y + n.y * tUp); octx.lineTo(r0.x - n.x * tDn, r0.y - n.y * tDn); octx.stroke(); }
+    const lineThrough = (p, up, tUp, tDn, cols, dash) => {   // a straight line through p along the vertical direction `up`
+      octx.setLineDash(dash);
+      for (const [col, wd] of cols) { octx.strokeStyle = col; octx.lineWidth = Math.max(wd, wd * k); octx.beginPath(); octx.moveTo(p.x + up.x * tUp, p.y + up.y * tUp); octx.lineTo(p.x - up.x * tDn, p.y - up.y * tDn); octx.stroke(); }
       octx.setLineDash([]);
-    }
+    };
+    const topY = Math.min(...P.map(q => q.y)) - 40 * k, botY = Math.max(...P.map(q => q.y)) + 30 * k;
+    if (SC.barPath.ref) { const r0 = SC.barPath.ref, up = upAt(r0); lineThrough(r0, up, Math.max(60, (r0.y - topY) / Math.max(0.3, Math.abs(up.y))), 25 * k, [['#000', 4], ['#fff', 2]], [10 * k, 7 * k]); }
+    if (SC.barPath.start) { const { p, up } = SC.barPath.start; lineThrough(p, up, 30 * k, Math.max(20, (botY - p.y) / Math.max(0.3, Math.abs(up.y))), [['#000', 3], ['#ffe14d', 1.5]], [4 * k, 5 * k]); }
     for (const [col, wd] of [['#000', 5], ['#ffe14d', 3]]) {
       octx.strokeStyle = col; octx.lineWidth = Math.max(wd, wd * k); octx.beginPath();
       P.forEach((p, q) => q ? octx.lineTo(p.x, p.y) : octx.moveTo(p.x, p.y)); octx.stroke();
@@ -1019,7 +1064,7 @@ async function showFrame(i) {
   if (my !== viewSeq) return;                              // a newer scrub superseded this one
   drawOverlay(i);
   if (!DEPTH_ON) {
-    $('caption').textContent = `Frame ${i + 1} of ${SC.N} · ${fmtT(i)}.` + (SC.barPath && $('showPath').checked ? ' Yellow: path of the barbell end, rep ' + (SC.barPath.rep + 1) + '. Dashed line: straight up from the middle of the planted foot.' : '');
+    $('caption').textContent = `Frame ${i + 1} of ${SC.N} · ${fmtT(i)}.` + (SC.barPath && $('showPath').checked ? ' Yellow: path of the barbell end, rep ' + (SC.barPath.rep + 1) + '. Thin yellow dashes: a straight drop from where it started falling. White dashes: straight up from the middle of the planted foot.' : '');
     return;
   }
   const f = SC.frames[i], ri = SC.reps.findIndex(r => r.measured && r.measured.includes(i)), ln = f && f.lines && SC.nearLeg && f.lines[SC.nearLeg];
