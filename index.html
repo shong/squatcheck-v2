@@ -145,7 +145,7 @@ details>summary{cursor:pointer}
   <h2 id="repH">Each rep</h2>
   <div id="repList"></div>
 </section>
-<section class="card" aria-labelledby="chH">
+<section class="card" id="chartCard" aria-labelledby="chH">
   <h2 id="chH">Hip height</h2>
   <p class="muted small">Hip height above the safety bar for the whole set. Click the chart, or focus it and use ← → to step frames.</p>
   <div id="chartWrap" tabindex="0" role="img" aria-label="Hip height chart. Use left and right arrow keys to step frames."></div>
@@ -165,6 +165,9 @@ details>summary{cursor:pointer}
 <script>
 'use strict';
 const FPS = 30, AN_LONG = 540;
+// Depth measurement (thigh angle, parallel verdicts, depth lines) is switched off while the bar path is being tested.
+// Set DEPTH_ON to true to bring all of it back.
+const DEPTH_ON = false;
 const SC = window.SC = { manual:{}, vw:0, vh:0, dur:0, N:0, bar:null, barAuto:false, frames:[], reps:[], nearLeg:null, busy:false, stats:{pose:0,seg:0}, view:0 };
 const $ = id => document.getElementById(id);
 const video = $('video'), ov = $('ov'), octx = ov.getContext('2d');
@@ -323,7 +326,7 @@ function setBar(p1, p2, auto, assumed) {
     : Math.abs(tilt) > MAX_BAR_TILT ? `The bar is tilted ${Math.abs(tilt).toFixed(1)}° in the image. Either the phone wasn't level or this isn't the safety bar: check the cyan line, and re-mark it if it's wrong.` : '';
   $('barInfo').textContent = assumed ? 'No safety bar found: assuming the phone was level.'
     : `Bar (${auto ? 'found automatically' : 'marked by hand'}): (${p1.x.toFixed(0)}, ${p1.y.toFixed(0)}) to (${p2.x.toFixed(0)}, ${p2.y.toFixed(0)}) in video pixels, tilt ${tilt.toFixed(1)}°`;
-  if (SC.reps.length) { $('warnInfo').textContent = SC.warn; $('warnInfo').hidden = !SC.warn; }
+  if (SC.reps.length && DEPTH_ON) { $('warnInfo').textContent = SC.warn; $('warnInfo').hidden = !SC.warn; }
   $('analyzeBtn').disabled = SC.busy;
   if (SC.pending) { SC.pending = false; guarded(finishAnalysis); return; }
   if (SC.reps.length) { computeResults(); renderResults(); setStatus('Bar re-marked: results updated without re-analysis.'); }
@@ -535,7 +538,7 @@ function largestBlob(seg, ids) {
   const px = [], py = []; if (best) for (const q of best) { px.push(q % w); py.push((q / w) | 0); }
   return { px, py };
 }
-async function measureFrame(i) {                           // the frame is already on acv
+async function measureFrame(i, footOnly) {                // the frame is already on acv; footOnly: just the shoe outline and leg pixel counts
   const sx = SC.vw / acv.width, sy = SC.vh / acv.height, f = SC.frames[i];
   const cnt = { L:0, R:0 }, lines = { L:null, R:null }, sil = { L:null, R:null }, foot = { L:null, R:null };
   const seg = await bodyParts();
@@ -545,6 +548,7 @@ async function measureFrame(i) {                           // the frame is alrea
       cnt[leg] = px.length;
       const fb = largestBlob(seg, leg === 'L' ? [22, 22] : [23, 23]);        // the shoe: its x extent gives the middle of the foot
       if (fb.px.length >= 60) { const sx2 = SC.vw / acv.width, sy2 = SC.vh / acv.height; foot[leg] = { x0: Math.min(...fb.px) * sx2, x1: Math.max(...fb.px) * sx2, y1: Math.max(...fb.py) * sy2, n: fb.px.length }; }
+      if (footOnly) continue;
       const top = new Map();                                  // highest labelled pixel in each column, in video pixels
       for (let q = 0; q < px.length; q++) if (!top.has(px[q]) || py[q] < top.get(px[q])) top.set(px[q], py[q]);
       sil[leg] = [...top].map(([x, y]) => ({ x: x * sx, y: y * sy })).sort((a, b) => a.x - b.x);
@@ -811,16 +815,19 @@ async function finishAnalysis() {
     rep.low = low; SC.frames[low].low = true;
     // the joint-based reading uses a wider window (low ±4): the angle really changes by a few degrees across the bottom,
     // and a wider median keeps the answer from moving when the scan lands a frame or two differently
-    rep.jointWin = []; for (let j = low - 4; j <= low + 4; j++) if (j >= 0 && j < SC.N) rep.jointWin.push(j);
-    await forFrames(rep.jointWin.filter(j => !(SC.frames[j] && SC.frames[j].kp)), j => poseFrame(j));
-    const ms = []; for (let j = low - 2; j <= low + 2; j++) if (j >= 0 && j < SC.N) ms.push(j);
+    if (DEPTH_ON) {
+      rep.jointWin = []; for (let j = low - 4; j <= low + 4; j++) if (j >= 0 && j < SC.N) rep.jointWin.push(j);
+      await forFrames(rep.jointWin.filter(j => !(SC.frames[j] && SC.frames[j].kp)), j => poseFrame(j));
+    }
+    const ms = [], reach = DEPTH_ON ? 2 : (r === 0 ? 1 : -1);      // with depth off only rep 1's shoe is needed (for the mid-foot line)
+    for (let j = low - reach; j <= low + reach; j++) if (j >= 0 && j < SC.N) ms.push(j);
     rep.measured = ms;
     for (let q = 0; q < ms.length; q++) {
       const m = ms[q];
-      setStatus(`Rep ${r + 1}: measuring thigh angle (frame ${m + 1})`, { pct: base + span * (0.4 + 0.6 * q / ms.length) });
+      setStatus(DEPTH_ON ? `Rep ${r + 1}: measuring thigh angle (frame ${m + 1})` : `Rep ${r + 1}: locating the foot (frame ${m + 1})`, { pct: base + span * (0.4 + 0.6 * q / ms.length) });
       if (cache.has(m)) { sizeAcv(); actx.drawImage(cache.get(m), 0, 0); } else await grabFrame(m);
       if (!(SC.frames[m] && SC.frames[m].kp)) await poseFrame(m);
-      await measureFrame(m);
+      await measureFrame(m, !DEPTH_ON);
     }
   }
   computeResults(); renderResults();
@@ -847,6 +854,7 @@ function computeResults() {
   let L = 0, R = 0;
   for (const f of SC.frames) if (f && f.cnt) { L += f.cnt.L; R += f.cnt.R; }
   SC.nearLeg = L >= R ? 'L' : 'R';
+  if (!DEPTH_ON) { for (const rep of SC.reps) { rep.thetas = []; rep.depth = null; rep.method = null; } return; }
   for (const rep of SC.reps) {
     rep.thetas = rep.measured.map(i => { const f = SC.frames[i], ln = f && f.lines && f.lines[SC.nearLeg]; return { f: i, th: ln ? theta(ln) : null }; });
     const used = rep.thetas.filter(t => t.th != null && Math.abs(t.th) <= 30);
@@ -868,7 +876,18 @@ function computeResults() {
 /* ---------- rendering ---------- */
 const fmtAngle = a => a == null ? 'n/a' : `${Math.abs(a).toFixed(1)}° ${a > 0 ? 'above' : 'below'}`;
 const fmtT = i => ((i + 0.5) / FPS).toFixed(2) + ' s';
+function renderBarOnly() {                                  // what the results card shows while depth is off
+  $('results').hidden = false; $('summaryCard').hidden = false; $('viewerCtl').hidden = false; $('warnInfo').hidden = true;
+  const total = SC.reps.length;
+  $('headline').className = 'mixed';
+  $('headline').innerHTML = `${total} rep${total === 1 ? '' : 's'} found<small>Depth checks are switched off while the bar path is being tested.</small>`;
+  $('summary').innerHTML = `<div class="stat"><b>${total}</b>Total reps</div>`;
+  $('repList').innerHTML = SC.reps.map((r, k) => `<div class="rep"><div><strong>Rep ${k + 1}</strong></div><div>${((r.start + 0.5) / FPS).toFixed(2)}–${((r.end + 0.5) / FPS).toFixed(2)} s${r.open ? ' · ⚠ cut off by the end of the video' : ''}</div><button type="button" data-view="${r.low}">View</button></div>`).join('');
+  $('repList').querySelectorAll('[data-view]').forEach(b => b.onclick = () => { showFrame(+b.dataset.view); $('stage').scrollIntoView({ block:'center', behavior:'smooth' }); });
+  $('chartCard').hidden = true; $('exportCard').hidden = true; $('scrub').max = SC.N - 1;
+}
 function renderResults() {
+  if (!DEPTH_ON) { renderBarOnly(); return; }
   $('results').hidden = false; $('summaryCard').hidden = false; $('viewerCtl').hidden = false; $('warnInfo').textContent = SC.warn || ''; $('warnInfo').hidden = !SC.warn;
   const total = SC.reps.length, done = SC.reps.filter(r => r.depth != null), valid = done.filter(r => r.depth <= 0).length, invalid = done.length - valid, unmeasured = total - done.length;
   const deepest = done.length ? Math.min(...done.map(r => r.depth)) : null;
@@ -941,7 +960,7 @@ function drawOverlay(i) {
   if (!SC.bar) return;
   const k = SC.vw / 360, showPath = $('showPath').checked, showDepth = $('showDepth').checked;
   octx.lineCap = 'round'; octx.lineWidth = Math.max(2, 2 * k);
-  if (!SC.assumedLevel) { octx.strokeStyle = '#00d0f0'; octx.beginPath(); octx.moveTo(SC.bar.p1.x, SC.bar.p1.y); octx.lineTo(SC.bar.p2.x, SC.bar.p2.y); octx.stroke(); }   // nothing to draw when level is assumed
+  if (DEPTH_ON && !SC.assumedLevel) { octx.strokeStyle = '#00d0f0'; octx.beginPath(); octx.moveTo(SC.bar.p1.x, SC.bar.p1.y); octx.lineTo(SC.bar.p2.x, SC.bar.p2.y); octx.stroke(); }   // nothing to draw when level is assumed
   if (SC.barPath && !drawPts && showPath) {                // barbell-end path for rep 1 (yellow), with the plate outline at this frame
     const P = SC.barPath.pts; octx.lineJoin = 'round';
     if (SC.barPath.ref) {
@@ -999,6 +1018,10 @@ async function showFrame(i) {
   await seekTo(i);
   if (my !== viewSeq) return;                              // a newer scrub superseded this one
   drawOverlay(i);
+  if (!DEPTH_ON) {
+    $('caption').textContent = `Frame ${i + 1} of ${SC.N} · ${fmtT(i)}.` + (SC.barPath && $('showPath').checked ? ' Yellow: path of the barbell end, rep ' + (SC.barPath.rep + 1) + '. Dashed line: straight up from the middle of the planted foot.' : '');
+    return;
+  }
   const f = SC.frames[i], ri = SC.reps.findIndex(r => r.measured && r.measured.includes(i)), ln = f && f.lines && SC.nearLeg && f.lines[SC.nearLeg];
   let why;
   if (ln) why = `Measured: ${fmtAngle(theta(ln))}${f.low ? ' (lowest frame of rep ' + (ri + 1) + ')' : ' (rep ' + (ri + 1) + ')'}.`;
@@ -1079,6 +1102,10 @@ $('recStart').onclick = () => {
 $('recStop').onclick = () => { if (mr && mr.state !== 'inactive') mr.stop(); };
 $('recCancel').onclick = () => { if (mr && mr.state === 'recording') { mr.onstop = null; mr.stop(); } stopStream(); $('recPanel').hidden = true; setStatus('Recording cancelled.'); };
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && SC.busy) setStatus('Resuming…'); });
+if (!DEPTH_ON) {                                           // hide every control that only matters for depth
+  for (const id of ['drawBtn', 'clearDraw', 'markBtn', 'barInfo']) $(id).hidden = true;
+  $('showDepth').checked = false; $('showDepth').parentElement.hidden = true;
+}
 </script>
 </body>
 </html>
