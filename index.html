@@ -120,7 +120,7 @@ details>summary{cursor:pointer}
 <section class="card" aria-label="Video">
   <div id="stage"><div id="zoomLayer"><video id="video" muted playsinline preload="auto"></video><canvas id="ov"></canvas></div></div>
   <div id="viewerCtl" hidden>
-    <div class="row toggles"><label><input type="checkbox" id="showDepth" checked> Depth line</label><label><input type="checkbox" id="showPath" checked> Bar path</label></div>
+    <div class="row toggles"><label><input type="checkbox" id="showDepth" checked> Depth line</label><label><input type="checkbox" id="showPath" checked> Bar tip path</label><label><input type="checkbox" id="showCentre" checked> Bar centre vs mid-foot</label><label>Camera lens <select id="lens"><option value="main">Main (1×)</option><option value="tele">2× zoom</option><option value="wide">Ultra-wide</option></select></label></div>
     <input id="scrub" type="range" min="0" max="0" value="0" aria-label="Frame" style="margin-top:8px">
     <div class="row" style="margin-top:4px">
       <button id="prevF" type="button">◀ Prev</button><button id="nextF" type="button">Next ▶</button>
@@ -129,6 +129,7 @@ details>summary{cursor:pointer}
     <p id="drawHint" class="muted small" hidden></p>
     <div id="caption" aria-live="polite"></div>
     <p id="pathInfo" class="small" hidden style="margin:0 0 8px"></p>
+    <p id="centreInfo" class="small" hidden style="margin:0 0 8px"></p>
   </div>
   <div class="row" style="margin-top:8px">
     <button id="markBtn" type="button">Mark bar by hand</button>
@@ -695,16 +696,47 @@ function descentWindow(pts) {
   for (let q = n - 1; q - 4 >= 0; q--) if ([0, 1, 2, 3, 4].every(d => okU(q - d))) { e0 = q; break; }
   return e0 - s0 >= 4 ? [s0, e0] : all;
 }
+// The plate is a big disc whose middle is near the bar tip. Seen from a phone on the floor it is an ellipse (wider than tall), so
+// vote for ellipses with a horizontal long axis: semi-width a = 15-40% of the width, height/width ratio 0.6-1.0, centre near the tip.
+function detectPlateNear(gr, t) {
+  const { w, h } = gr, { gx, gy, m } = sobelOf(gr), amin = Math.round(0.15 * w), amax = Math.round(0.40 * w), R = Math.round(0.3 * w), cw = 2 * R + 1;
+  const ars = [0.6, 0.68, 0.76, 0.84, 0.92, 1.0], As = []; for (let a = amin; a <= amax; a += 2) As.push(a);
+  const x0 = Math.max(1, Math.round(t.x - R - amax)), x1 = Math.min(w - 2, Math.round(t.x + R + amax)), y0 = Math.max(1, Math.round(t.y - R - amax)), y1 = Math.min(h - 2, Math.round(t.y + R + amax));
+  const vals = []; for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) vals.push(m[y * w + x]);
+  vals.sort((p, q) => p - q); const thr = Math.max(30, vals[Math.floor(0.7 * vals.length)] || 0);
+  const votes = new Float32Array(As.length * ars.length * cw * cw), ox = Math.round(t.x) - R, oy = Math.round(t.y) - R;
+  for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) {
+    const i = y * w + x; if (m[i] <= thr) continue;
+    for (let ai = 0; ai < As.length; ai++) for (let ri = 0; ri < ars.length; ri++) {
+      const a = As[ai], b = ars[ri] * a, n = Math.hypot(a * gx[i], b * gy[i]) || 1, c = a * gx[i] / n, s2 = b * gy[i] / n;
+      for (let sg = -1; sg <= 1; sg += 2) {
+        const ci = Math.round(x - sg * a * c) - ox, cj = Math.round(y - sg * b * s2) - oy;
+        if (ci >= 0 && cj >= 0 && ci < cw && cj < cw) votes[((ai * ars.length + ri) * cw + cj) * cw + ci]++;
+      }
+    }
+  }
+  let best = null;
+  for (let ai = 0; ai < As.length; ai++) for (let ri = 0; ri < ars.length; ri++) {
+    const a = As[ai], per = Math.PI * (3 * (a + ars[ri] * a) - Math.sqrt((3 * a + ars[ri] * a) * (a + 3 * ars[ri] * a)));     // ellipse perimeter (Ramanujan)
+    const base = (ai * ars.length + ri) * cw * cw;
+    for (let cj = 1; cj < cw - 1; cj++) for (let ci = 1; ci < cw - 1; ci++) {            // 3x3 sum: the votes of one rim land in neighbouring cells
+      let v = 0; for (let dj = -1; dj <= 1; dj++) for (let di = -1; di <= 1; di++) v += votes[base + (cj + dj) * cw + ci + di];
+      const sc = v / per; if (sc >= 0.2 && (!best || sc > best.score)) best = { x: ox + ci, y: oy + cj, a, b: ars[ri] * a, score: sc };
+    }
+  }
+  return best;
+}
 async function traceBar(k, start, anchor) {               // start: tapped point (video px) on frame `anchor`; follow it both ways
   const rep = SC.reps[k]; if (!rep) return;
   const anchorF = clamp(anchor, rep.start, rep.end), got = new Map();
+  let plate = null;                                        // the plate's ellipse on the anchor frame, in video pixels
   const run = async list => {                              // list[0] is the anchor frame; stop at the first frame where the end is lost
     let prevG = null, p = null, v = { x: 0, y: 0 }, stopped = false;
     await forFrames(list, async (i, q) => {
       setStatus(`Tracing the bar end, rep ${k + 1}: frame ${i + 1}`, { pct: 100 * (got.size) / (rep.end - rep.start + 1) });
       if (stopped) return;
       const gr = grayOf(acv);
-      if (!p) p = { x: start.x * gr.w / SC.vw, y: start.y * gr.h / SC.vh, lost: false };
+      if (!p) { p = { x: start.x * gr.w / SC.vw, y: start.y * gr.h / SC.vh, lost: false }; if (!plate) { const d = detectPlateNear(gr, p); if (d) plate = { x: d.x * SC.vw / gr.w, y: d.y * SC.vh / gr.h, a: d.a * SC.vw / gr.w, b: d.b * SC.vw / gr.w, score: d.score }; } }
       else {
         const np = trackStep(prevG, gr, p, v);
         if (np.lost) { stopped = true; return; }
@@ -720,7 +752,7 @@ async function traceBar(k, start, anchor) {               // start: tapped point
   if (pts.length < 5) { SC.barPath = null; return; }
   const smAll = pts.map((c, q) => { const w = pts.slice(Math.max(0, q - 1), q + 2); return Object.assign({}, c, { x: w.reduce((a, b) => a + b.x, 0) / w.length, y: w.reduce((a, b) => a + b.y, 0) / w.length }); });
   const [s0, e0] = descentWindow(smAll), sm = e0 - s0 >= 4 ? smAll.slice(s0, e0 + 1) : smAll;
-  SC.barPath = { rep: k, pts: sm, ref: null, info: '' };
+  SC.barPath = { rep: k, pts: sm, ref: null, info: '', plate, centre: null, centreInfo: '' };
   // plumb line: straight up from the near-leg ankle (the planted foot) - how far does the bar wander from it?
   const key = SC.nearLeg === 'R' ? 'ra' : 'la', as = [], fx = [], fy = [];
   for (let i = rep.start; i <= rep.end; i++) {
@@ -744,22 +776,61 @@ async function traceBar(k, start, anchor) {               // start: tapped point
   SC.barPath.start = { p: P0, up: up0 };
   let foot = '';
   if (refPt) { SC.barPath.ref = refPt; const off = (P0.x - refPt.x) * right0.x + (P0.y - refPt.y) * right0.y; foot = ` The white dot on the floor is ${refKind}; the bar started ${Math.abs(Math.round(off))} px ${off > 0 ? 'right' : 'left'} of it. The sleeve end is closer to the camera than the lifter, so that gap depends on the camera angle and isn't judged: line the camera up with the bar if you want the tip to sit over the bar's centre.`; }
+  computeCentre();
   SC.barPath.info = `Bar end, rep ${k + 1} (${cover}): measured against the white dashed line, a straight drop from where it started falling (vertical ${vertNote}). It strays at most ${maxDev.toFixed(0)} px from that line and ends ${side(endDev)}.${foot}`;
 }
+// ---- bar centre from the tip: undo the perspective ----
+// The sleeve end is closer to the camera than the lifter, so its sideways movement is magnified. The plate (45 cm across) gives the
+// distance; the bar axis is taken as horizontal and pointing at the camera, so the bar's centre is 1.10 m behind the tip and the
+// plate centre 0.42 m behind it. Everything is worked in a level frame (the camera's tilt comes from the rack uprights).
+const LENSES = { main: { fov: 63, label: 'main camera (1x)' }, tele: { fov: 34, label: '2x zoom' }, wide: { fov: 107, label: 'ultra-wide' } };   // field of view across the longer side of the frame
+const PLATE_D = 0.45, TIP_TO_CENTRE = 1.10, TIP_TO_PLATE = 0.42;
+function computeCentre() {
+  const B = SC.barPath; if (!B) return;
+  B.centre = null; B.centreInfo = '';
+  const pl = B.plate;
+  if (!pl || pl.score < 0.25) { B.centreInfo = "The plate couldn't be measured on this frame, so the bar centre isn't estimated."; return; }
+  const lens = LENSES[$('lens').value] || LENSES.main, f = Math.max(SC.vw, SC.vh) / (2 * Math.tan(lens.fov * Math.PI / 360)), cx = SC.vw / 2, cy = SC.vh / 2;
+  let pitch = 0; if (SC.vert && SC.vert.vp) { const d = cy - SC.vert.vp.y; pitch = Math.sign(d || 1) * Math.atan(f / Math.abs(d)); }       // camera looking up = positive
+  const cp = Math.cos(pitch), sp = Math.sin(pitch);
+  const toLevel = (X, Y, Z) => ({ x: X, y: Y * cp - Z * sp, z: Y * sp + Z * cp }), fromLevel = P => ({ x: P.x, y: P.y * cp + P.z * sp, z: -P.y * sp + P.z * cp });
+  const ray = (x, y) => toLevel(x - cx, y - cy, f);
+  const Zp = f * PLATE_D / (2 * pl.a), H = toLevel((pl.x - cx) * Zp / f, (pl.y - cy) * Zp / f, Zp), zTip = H.z - TIP_TO_PLATE, zC = zTip + TIP_TO_CENTRE;
+  if (!(zTip > 0.2)) { B.centreInfo = "The plate looks too large for this lens setting, so the bar centre isn't estimated. Try another lens."; return; }
+  const pts = B.pts.map(t => { const r = ray(t.x, t.y), sc = zTip / r.z, P = { x: r.x * sc, y: r.y * sc, z: zC }, c = fromLevel(P); return { f: t.f, X: P.x, x: cx + f * c.x / c.z, y: cy + f * c.y / c.z }; });
+  const rep = SC.reps[B.rep], F = B.ref;
+  const kp = SC.frames[rep.low] && SC.frames[rep.low].kp, hk = SC.nearLeg === 'R' ? ['rh', 'rk'] : ['lh', 'lk'];
+  const toes = kp && kp[hk[0]] && kp[hk[1]] ? (Math.sign(kp[hk[1]].x - kp[hk[0]].x) || 1) : 1;         // which way the toes point in the image
+  let XF = null; if (F) { const rf = ray(F.x, F.y); XF = rf.x * zC / rf.z; }                          // assume the foot is as far away as the bar centre
+  const bi = B.pts.reduce((b, p, q) => Math.abs(p.f - rep.low) < Math.abs(B.pts[b].f - rep.low) ? q : b, 0);
+  const off = q => XF == null ? null : (pts[q].X - XF) * toes * 100, o0 = off(0), oB = off(bi);
+  const dr = Math.max(...pts.map(p => Math.abs(p.X - pts[0].X))) * 100;
+  const toward = v => Math.abs(v).toFixed(0) + ' cm ' + (v > 0 ? 'toward the toes' : 'toward the heels');
+  B.centre = { pts, offBottom: oB, offStart: o0, drift: dr, zTip, zC, mag: zC / zTip, pitchDeg: pitch * 180 / Math.PI };
+  B.centreInfo = `Bar centre estimate (${lens.label}, 45 cm plate, camera facing along the bar, tilt ${(pitch * 180 / Math.PI).toFixed(0)}° up): the plate is ${(2 * pl.a).toFixed(0)} px across, so the sleeve end is about ${zTip.toFixed(1)} m from the camera and the bar's centre about ${zC.toFixed(1)} m, which magnifies the tip's sideways movement about ${(zC / zTip).toFixed(1)}× compared with the bar centre's.`
+    + (oB != null ? ` At the bottom the bar's centre is about ${toward(oB)} of mid-foot (the green line and white dot), assuming the foot is as far from the camera as the bar's centre; if the bar was centred over mid-foot when the descent started, that becomes ${toward(oB - o0)}.` : '')
+    + ` Over the rep the bar centre moves sideways by at most ${dr.toFixed(1)} cm. These depend on the lens setting and the plate being 45 cm, so treat them as estimates.`;
+}
+function showPathInfo() {
+  const B = SC.barPath;
+  $('pathInfo').textContent = B ? B.info : ''; $('pathInfo').hidden = !B;
+  $('centreInfo').textContent = B ? B.centreInfo : ''; $('centreInfo').hidden = !B || !B.centreInfo;
+}
+$('lens').onchange = () => { computeCentre(); showPathInfo(); showFrame(SC.view); };
 let traceMode = false;
 $('traceBtn').onclick = () => {
   if (SC.busy || !SC.reps.length) return;
   if (traceMode) { traceMode = false; $('stage').classList.remove('marking'); $('drawHint').hidden = true; return; }
   traceMode = true; drawPts = null; markPts = null; $('stage').classList.add('marking'); $('drawHint').hidden = false;
   $('drawHint').textContent = "Scrub to a frame of rep 1 where the end of the bar (the tip of the sleeve past the plate) is clearly visible, then tap it. Press Trace bar end again to cancel.";
-  SC.barPath = null; $('pathInfo').hidden = true; const r0 = SC.reps[0]; showFrame(SC.view >= r0.start && SC.view <= r0.end ? SC.view : r0.low);
+  SC.barPath = null; showPathInfo(); const r0 = SC.reps[0]; showFrame(SC.view >= r0.start && SC.view <= r0.end ? SC.view : r0.low);
 };
 async function runTrace(pt) {
   traceMode = false; $('stage').classList.remove('marking'); $('drawHint').hidden = true;
   const anchor = SC.view;
   await guarded(async () => { await traceBar(0, pt, anchor); });
   setStatus(SC.barPath ? 'Bar end traced for rep 1 (yellow line).' : "Could not follow the bar end. Try a frame where it's sharper, or tap closer to the tip.");
-  $('pathInfo').textContent = SC.barPath ? SC.barPath.info : ''; $('pathInfo').hidden = !SC.barPath;
+  showPathInfo();
   showFrame(anchor);
 }
 
@@ -886,7 +957,7 @@ async function finishAnalysis() {
     if (tip) await traceBar(0, tip, SC.reps[0].low); else SC.barPath = null;
   } catch (e) { console.warn('bar end trace failed', e); SC.barPath = null; }
   setStatus(`Done in ${secs.toFixed(1)} s. ${SC.reps.length} rep${SC.reps.length === 1 ? '' : 's'} found.` + (SC.barPath ? ' Bar end traced for rep 1.' : " Couldn't find the bar end by itself: press Trace bar end (rep 1) and tap it."));
-  $('pathInfo').textContent = SC.barPath ? SC.barPath.info : ''; $('pathInfo').hidden = !SC.barPath;
+  showPathInfo();
   showFrame(SC.view);
 }
 function setBusy(b) { for (const id of ['analyzeBtn', 'markBtn', 'pick', 'sampleBtn', 'recBtn']) $(id).disabled = b; }
@@ -1004,6 +1075,20 @@ function drawOverlay(i) {
   if (!SC.bar) return;
   const k = SC.vw / 360, showPath = $('showPath').checked, showDepth = $('showDepth').checked;
   octx.lineCap = 'round'; octx.lineWidth = Math.max(2, 2 * k);
+  if (SC.barPath && SC.barPath.centre && !drawPts && $('showCentre').checked) {       // estimated bar-centre path, with a vertical through the middle of the foot
+    const B = SC.barPath, C = B.centre.pts;
+    if (B.ref) {
+      const r0 = B.ref, up = upAt(r0), topY = Math.min(...C.map(q => q.y)) - 30 * k, tUp = Math.max(60, (r0.y - topY) / Math.max(0.3, Math.abs(up.y)));
+      octx.setLineDash([10 * k, 7 * k]);
+      for (const [col, wd] of [['#000', 4], ['#9dff8a', 2]]) { octx.strokeStyle = col; octx.lineWidth = Math.max(wd, wd * k); octx.beginPath(); octx.moveTo(r0.x + up.x * tUp, r0.y + up.y * tUp); octx.lineTo(r0.x, r0.y); octx.stroke(); }
+      octx.setLineDash([]);
+      octx.fillStyle = '#fff'; octx.strokeStyle = '#000'; octx.lineWidth = Math.max(2, 2 * k); octx.beginPath(); octx.arc(r0.x, r0.y, Math.max(5, 5 * k), 0, 7); octx.fill(); octx.stroke();
+    }
+    octx.lineJoin = 'round';
+    for (const [col, wd] of [['#000', 5], ['#00e5ff', 3]]) { octx.strokeStyle = col; octx.lineWidth = Math.max(wd, wd * k); octx.beginPath(); C.forEach((p, q) => q ? octx.lineTo(p.x, p.y) : octx.moveTo(p.x, p.y)); octx.stroke(); }
+    const cur = C.reduce((b, p) => Math.abs(p.f - i) < Math.abs(b.f - i) ? p : b, C[0]);
+    if (Math.abs(cur.f - i) <= 1) { octx.fillStyle = '#00e5ff'; octx.strokeStyle = '#000'; octx.lineWidth = Math.max(2, 2 * k); octx.beginPath(); octx.arc(cur.x, cur.y, Math.max(6, 6 * k), 0, 7); octx.fill(); octx.stroke(); }
+  }
   if (DEPTH_ON && !SC.assumedLevel) { octx.strokeStyle = '#00d0f0'; octx.beginPath(); octx.moveTo(SC.bar.p1.x, SC.bar.p1.y); octx.lineTo(SC.bar.p2.x, SC.bar.p2.y); octx.stroke(); }   // nothing to draw when level is assumed
   if (SC.barPath && !drawPts && showPath) {                // barbell-end path for rep 1 (yellow), with the plate outline at this frame
     const P = SC.barPath.pts; octx.lineJoin = 'round';
@@ -1017,7 +1102,6 @@ function drawOverlay(i) {
       const { p, up } = SC.barPath.start, floorY = SC.barPath.ref ? SC.barPath.ref.y : botY;
       lineThrough(p, up, 40 * k, Math.max(20, (floorY - p.y) / Math.max(0.3, Math.abs(up.y))), [['#000', 4], ['#fff', 2]], [10 * k, 7 * k]);
     }
-    if (SC.barPath.ref) { const r0 = SC.barPath.ref; octx.fillStyle = '#fff'; octx.strokeStyle = '#000'; octx.lineWidth = Math.max(2, 2 * k); octx.beginPath(); octx.arc(r0.x, r0.y, Math.max(5, 5 * k), 0, 7); octx.fill(); octx.stroke(); }   // middle of the planted foot
     for (const [col, wd] of [['#000', 5], ['#ffe14d', 3]]) {
       octx.strokeStyle = col; octx.lineWidth = Math.max(wd, wd * k); octx.beginPath();
       P.forEach((p, q) => q ? octx.lineTo(p.x, p.y) : octx.moveTo(p.x, p.y)); octx.stroke();
@@ -1068,7 +1152,7 @@ async function showFrame(i) {
   if (my !== viewSeq) return;                              // a newer scrub superseded this one
   drawOverlay(i);
   if (!DEPTH_ON) {
-    $('caption').textContent = `Frame ${i + 1} of ${SC.N} · ${fmtT(i)}.` + (SC.barPath && $('showPath').checked ? ' Yellow: path of the barbell end, rep ' + (SC.barPath.rep + 1) + '. White dashes: a straight drop from where the bar started falling. White dot: the middle of the planted foot.' : '');
+    $('caption').textContent = `Frame ${i + 1} of ${SC.N} · ${fmtT(i)}.` + (SC.barPath && $('showPath').checked ? ' Yellow: path of the barbell end, rep ' + (SC.barPath.rep + 1) + '. White dashes: a straight drop from where the bar started falling.' : '') + (SC.barPath && SC.barPath.centre && $('showCentre').checked ? ' Cyan: estimated path of the bar centre. Green dashes and white dot: straight up from the middle of the planted foot.' : '');
     return;
   }
   const f = SC.frames[i], ri = SC.reps.findIndex(r => r.measured && r.measured.includes(i)), ln = f && f.lines && SC.nearLeg && f.lines[SC.nearLeg];
@@ -1081,7 +1165,7 @@ async function showFrame(i) {
   $('caption').textContent = `Frame ${i + 1} of ${SC.N} · ${fmtT(i)}. ${why}` + (jt != null ? ` Joint line (hip to knee): ${fmtAngle(jt)}; estimate from joints${$('showDepth').checked ? ' (pink line)' : ''}: ${fmtAngle(jt - JOINT_OFFSET)}.` : '') + (hand ? ` Hand-drawn: ${fmtAngle(theta(hand))}.` : '') + (SC.barPath && $('showPath').checked ? ' Yellow: path of the barbell end, rep ' + (SC.barPath.rep + 1) + '.' : '');
 }
 $('scrub').addEventListener('input', e => showFrame(+e.target.value));
-$('showDepth').onchange = $('showPath').onchange = () => showFrame(SC.view);
+$('showDepth').onchange = $('showPath').onchange = $('showCentre').onchange = () => showFrame(SC.view);
 // Zoom the stage onto the near leg (hip and knee plus a margin) so the thigh is easier to trace.
 function zoomToLeg() {
   const f = SC.frames[SC.view], k = f && f.kp, a = SC.nearLeg === 'R' ? 'rh' : 'lh', b = SC.nearLeg === 'R' ? 'rk' : 'lk';
