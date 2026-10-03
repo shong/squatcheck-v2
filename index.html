@@ -108,6 +108,7 @@ details>summary{cursor:pointer}
       <li>Film side-on, with the phone propped at about hip height, level and held still.</li>
       <li>Keep the whole lifter and the near safety bar in frame, including the knee at the bottom.</li>
       <li>Use a power rack with safety bars set at parallel; one lifter in view.</li>
+      <li>For the bar path: put the camera directly in line with the barbell so the plate faces the lens, 3 m or more back, at about chest height and level (not tilted up). Then the sleeve end sits over the bar's centre and the white dot at mid-foot is a fair comparison.</li>
     </ul>
   </details>
 </section>
@@ -742,8 +743,8 @@ async function traceBar(k, start, anchor) {               // start: tapped point
   const V = SC.vert, vertNote = V ? (V.vp ? `corrected for the camera's tilt using the rack uprights, which converge by ${V.conv.toFixed(1)}°` : 'corrected using the lean of the rack uprights') : 'taken as perpendicular to the safety bar, because no rack uprights were found';
   SC.barPath.start = { p: P0, up: up0 };
   let foot = '';
-  if (refPt) { SC.barPath.ref = refPt; const off = (P0.x - refPt.x) * right0.x + (P0.y - refPt.y) * right0.y; foot = ` For context, the dashed white line goes straight up from ${refKind}, and the bar started ${Math.abs(Math.round(off))} px ${off > 0 ? 'right' : 'left'} of it. The sleeve end is closer to the camera than the lifter, so that gap depends on the camera angle and isn't judged.`; }
-  SC.barPath.info = `Bar end, rep ${k + 1} (${cover}): measured against a straight drop from where it started falling (vertical ${vertNote}). It strays at most ${maxDev.toFixed(0)} px from that line and ends ${side(endDev)}.${foot}`;
+  if (refPt) { SC.barPath.ref = refPt; const off = (P0.x - refPt.x) * right0.x + (P0.y - refPt.y) * right0.y; foot = ` The white dot on the floor is ${refKind}; the bar started ${Math.abs(Math.round(off))} px ${off > 0 ? 'right' : 'left'} of it. The sleeve end is closer to the camera than the lifter, so that gap depends on the camera angle and isn't judged: line the camera up with the bar if you want the tip to sit over the bar's centre.`; }
+  SC.barPath.info = `Bar end, rep ${k + 1} (${cover}): measured against the white dashed line, a straight drop from where it started falling (vertical ${vertNote}). It strays at most ${maxDev.toFixed(0)} px from that line and ends ${side(endDev)}.${foot}`;
 }
 let traceMode = false;
 $('traceBtn').onclick = () => {
@@ -1012,8 +1013,11 @@ function drawOverlay(i) {
       octx.setLineDash([]);
     };
     const topY = Math.min(...P.map(q => q.y)) - 40 * k, botY = Math.max(...P.map(q => q.y)) + 30 * k;
-    if (SC.barPath.ref) { const r0 = SC.barPath.ref, up = upAt(r0); lineThrough(r0, up, Math.max(60, (r0.y - topY) / Math.max(0.3, Math.abs(up.y))), 25 * k, [['#000', 4], ['#fff', 2]], [10 * k, 7 * k]); }
-    if (SC.barPath.start) { const { p, up } = SC.barPath.start; lineThrough(p, up, 30 * k, Math.max(20, (botY - p.y) / Math.max(0.3, Math.abs(up.y))), [['#000', 3], ['#ffe14d', 1.5]], [4 * k, 5 * k]); }
+    if (SC.barPath.start) {                                 // the one reference: a straight drop from where the bar started falling, down to the floor
+      const { p, up } = SC.barPath.start, floorY = SC.barPath.ref ? SC.barPath.ref.y : botY;
+      lineThrough(p, up, 40 * k, Math.max(20, (floorY - p.y) / Math.max(0.3, Math.abs(up.y))), [['#000', 4], ['#fff', 2]], [10 * k, 7 * k]);
+    }
+    if (SC.barPath.ref) { const r0 = SC.barPath.ref; octx.fillStyle = '#fff'; octx.strokeStyle = '#000'; octx.lineWidth = Math.max(2, 2 * k); octx.beginPath(); octx.arc(r0.x, r0.y, Math.max(5, 5 * k), 0, 7); octx.fill(); octx.stroke(); }   // middle of the planted foot
     for (const [col, wd] of [['#000', 5], ['#ffe14d', 3]]) {
       octx.strokeStyle = col; octx.lineWidth = Math.max(wd, wd * k); octx.beginPath();
       P.forEach((p, q) => q ? octx.lineTo(p.x, p.y) : octx.moveTo(p.x, p.y)); octx.stroke();
@@ -1064,7 +1068,7 @@ async function showFrame(i) {
   if (my !== viewSeq) return;                              // a newer scrub superseded this one
   drawOverlay(i);
   if (!DEPTH_ON) {
-    $('caption').textContent = `Frame ${i + 1} of ${SC.N} · ${fmtT(i)}.` + (SC.barPath && $('showPath').checked ? ' Yellow: path of the barbell end, rep ' + (SC.barPath.rep + 1) + '. Thin yellow dashes: a straight drop from where it started falling. White dashes: straight up from the middle of the planted foot.' : '');
+    $('caption').textContent = `Frame ${i + 1} of ${SC.N} · ${fmtT(i)}.` + (SC.barPath && $('showPath').checked ? ' Yellow: path of the barbell end, rep ' + (SC.barPath.rep + 1) + '. White dashes: a straight drop from where the bar started falling. White dot: the middle of the planted foot.' : '');
     return;
   }
   const f = SC.frames[i], ri = SC.reps.findIndex(r => r.measured && r.measured.includes(i)), ln = f && f.lines && SC.nearLeg && f.lines[SC.nearLeg];
